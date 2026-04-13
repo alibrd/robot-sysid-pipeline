@@ -1,0 +1,46 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+env/
+venv/
+.venv/
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+docs/pipeline_theory_and_validation.html
+docs/pipeline_theory_and_validation.pdf
+
+# Binary/data outputs
+*.npz
+
+# Temporary outputs and generated files
+tmp_output/
+tmp_*.json
+tmp_*.npz
+tmp_*
+
+# local settings
+.env.local

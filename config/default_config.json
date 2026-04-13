@@ -1,0 +1,44 @@
+{
+    "urdf_path": "",
+    "output_dir": "output",
+    "method": "newton_euler",
+
+    "joint_limits": {
+        "position": null,
+        "velocity": null,
+        "acceleration": null
+    },
+
+    "excitation": {
+        "basis_functions": "both",
+        "optimize_phase": false,
+        "num_harmonics": 5,
+        "base_frequency_hz": 0.2,
+        "optimize_condition_number": true,
+        "constraint_style": "literature_standard",
+        "optimizer_max_iter": 300,
+        "optimizer_pop_size": 15,
+        "trajectory_duration_periods": 1
+    },
+
+    "friction": {
+        "model": "none"
+    },
+
+    "identification": {
+        "solver": "ols",
+        "parameter_bounds": false,
+        "feasibility_method": "none",
+        "data_file": null
+    },
+
+    "filtering": {
+        "enabled": false,
+        "cutoff_frequency_hz": 10.0,
+        "filter_order": 4
+    },
+
+    "downsampling": {
+        "frequency_hz": 0
+    }
+}
