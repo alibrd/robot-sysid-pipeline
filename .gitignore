@@ -32,6 +32,7 @@ Thumbs.db
 *.log
 docs/pipeline_theory_and_validation.html
 docs/pipeline_theory_and_validation.pdf
+*.diff
 
 # Binary/data outputs
 *.npz

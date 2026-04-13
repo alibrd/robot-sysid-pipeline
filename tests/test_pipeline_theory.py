@@ -12,8 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 ASSET_DIR = ROOT / "tests" / "assets"
+URDF_RRBOT = str(ASSET_DIR / "RRBot_single.urdf")
 URDF_1DOF = str(ASSET_DIR / "SC_1DoF.urdf")
 URDF_3DOF = str(ASSET_DIR / "SC_3DoF.urdf")
+URDF_DEFAULT = URDF_RRBOT
 
 
 def _write_config(
@@ -70,15 +72,15 @@ def test_stage_1_and_3_parser_and_kinematics_build_standalone_model():
     from src.kinematics import RobotKinematics
     from src.urdf_parser import parse_urdf
 
-    robot = parse_urdf(URDF_3DOF)
+    robot = parse_urdf(URDF_DEFAULT)
     kin = RobotKinematics(robot)
 
-    assert robot.nDoF == 3
-    assert robot.revolute_joint_names == ["Joint_1", "Joint_2", "Joint_3"]
-    assert kin.PI.shape == (30, 1)
+    assert robot.nDoF == 2
+    assert robot.revolute_joint_names == ["single_rrbot_joint1", "single_rrbot_joint2"]
+    assert kin.PI.shape == (20, 1)
     np.testing.assert_allclose(
         kin.PI[:10].flatten(),
-        np.array([5.0, 0.0, 0.0, 0.5, 0.1, 0.0, 0.0, 0.1, 0.0, 0.05]),
+        np.array([1.0, 0.0, 0.0, 0.45, 1.2025, 0.0, 0.0, 1.2025, 0.0, 1.0]),
         atol=1e-12,
     )
 
@@ -86,7 +88,7 @@ def test_stage_1_and_3_parser_and_kinematics_build_standalone_model():
 def test_stage_2_joint_limit_extraction_rejects_missing_json_overrides():
     from src.urdf_parser import extract_joint_limits, parse_urdf
 
-    robot = parse_urdf(URDF_1DOF)
+    robot = parse_urdf(URDF_DEFAULT)
     cfg_limits = {
         "position": None,
         "velocity": None,
@@ -103,7 +105,7 @@ def test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques(tmp_
     from src.kinematics import RobotKinematics
     from src.urdf_parser import parse_urdf
 
-    kin = RobotKinematics(parse_urdf(URDF_1DOF))
+    kin = RobotKinematics(parse_urdf(URDF_DEFAULT))
     reg_el, kept = euler_lagrange_regressor_builder(kin, str(tmp_path / "el_cache"))
     pi = kin.PI.flatten()
     rng = np.random.default_rng(7)
@@ -172,7 +174,7 @@ def test_stage_6_noninteger_sine_periods_are_rejected_by_config(tmp_path):
     cfg_path.write_text(
         json.dumps(
             {
-                "urdf_path": URDF_1DOF,
+                "urdf_path": URDF_DEFAULT,
                 "output_dir": str(tmp_path / "out"),
                 "excitation": {
                     "basis_functions": "sine",
@@ -242,12 +244,12 @@ def test_stage_8_observation_matrix_matches_manual_stacking_equation():
     from src.observation_matrix import build_observation_matrix
     from src.urdf_parser import parse_urdf
 
-    kin = RobotKinematics(parse_urdf(URDF_3DOF))
+    kin = RobotKinematics(parse_urdf(URDF_DEFAULT))
     rng = np.random.default_rng(21)
-    q = rng.uniform(-0.5, 0.5, size=(12, 3))
-    dq = rng.uniform(-1.0, 1.0, size=(12, 3))
-    ddq = rng.uniform(-2.0, 2.0, size=(12, 3))
-    tau = rng.uniform(-0.5, 0.5, size=(12, 3))
+    q = rng.uniform(-0.5, 0.5, size=(12, kin.nDoF))
+    dq = rng.uniform(-1.0, 1.0, size=(12, kin.nDoF))
+    ddq = rng.uniform(-2.0, 2.0, size=(12, kin.nDoF))
+    tau = rng.uniform(-0.5, 0.5, size=(12, kin.nDoF))
     cfg = {
         "friction": {"model": "none"},
         "filtering": {"enabled": False},
@@ -317,7 +319,7 @@ def test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_
     from src.kinematics import RobotKinematics
     from src.urdf_parser import parse_urdf
 
-    kin = RobotKinematics(parse_urdf(URDF_1DOF))
+    kin = RobotKinematics(parse_urdf(URDF_DEFAULT))
     rng = np.random.default_rng(11)
 
     if method == "newton_euler":
@@ -347,8 +349,8 @@ def test_stage_10_parameter_bounds_enable_bounded_ls(tmp_path):
 
     cfg_path = _write_config(
         tmp_path,
-        URDF_1DOF,
-        n_dof=1,
+        URDF_DEFAULT,
+        n_dof=2,
         parameter_bounds=True,
     )
 
@@ -379,7 +381,7 @@ def test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes(tmp_path)
     cfg_path.write_text(
         json.dumps(
             {
-                "urdf_path": URDF_1DOF,
+                "urdf_path": URDF_DEFAULT,
                 "output_dir": str(tmp_path / "out"),
                 "method": "euler_lagrange",
                 "identification": {"feasibility_method": "lmi"},
@@ -397,8 +399,8 @@ def test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstraine
 
     cfg_path = _write_config(
         tmp_path,
-        URDF_3DOF,
-        n_dof=3,
+        URDF_DEFAULT,
+        n_dof=2,
     )
 
     SystemIdentificationPipeline(str(cfg_path)).run()
@@ -415,8 +417,8 @@ def test_stage_12_constrained_lmi_returns_feasible_newton_euler_model(tmp_path):
 
     cfg_path = _write_config(
         tmp_path,
-        URDF_1DOF,
-        n_dof=1,
+        URDF_DEFAULT,
+        n_dof=2,
         feasibility="lmi",
     )
 
@@ -426,3 +428,12 @@ def test_stage_12_constrained_lmi_returns_feasible_newton_euler_model(tmp_path):
     assert bool(results["feasible"])
     assert bool(results["solved_in_full_space"])
     assert is_pseudo_inertia_psd(results["pi_identified"][:10])
+
+
+def test_stage_1_sc_reference_models_remain_supported():
+    from src.urdf_parser import parse_urdf
+
+    r1 = parse_urdf(URDF_1DOF)
+    r3 = parse_urdf(URDF_3DOF)
+    assert r1.nDoF == 1
+    assert r3.nDoF == 3

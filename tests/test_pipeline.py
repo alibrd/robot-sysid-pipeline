@@ -12,8 +12,10 @@ sys.path.insert(0, str(ROOT))
 
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_DIR = ASSET_DIR
+URDF_RRBOT = str(URDF_DIR / "RRBot_single.urdf")
 URDF_1DOF = str(URDF_DIR / "SC_1DoF.urdf")
 URDF_3DOF = str(URDF_DIR / "SC_3DoF.urdf")
+URDF_DEFAULT = URDF_RRBOT
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -21,6 +23,13 @@ URDF_3DOF = str(URDF_DIR / "SC_3DoF.urdf")
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestURDFParsing:
+    def test_default_rrbot_chain_and_tw0(self):
+        from src.urdf_parser import parse_urdf
+        r = parse_urdf(URDF_DEFAULT)
+        assert r.nDoF == 2
+        assert r.revolute_joint_names == ["single_rrbot_joint1", "single_rrbot_joint2"]
+        np.testing.assert_allclose(r.Tw_0, np.eye(4), atol=1e-14)
+
     def test_1dof_chain_and_tw0(self):
         from src.urdf_parser import parse_urdf
         r = parse_urdf(URDF_1DOF)
@@ -196,16 +205,22 @@ class TestTrajectoryBoundary:
 
 class TestNEvsEL:
     @pytest.fixture
-    def kin_1dof(self):
+    def kin_default(self):
         from src.urdf_parser import parse_urdf
         from src.kinematics import RobotKinematics
-        return RobotKinematics(parse_urdf(URDF_1DOF))
+        return RobotKinematics(parse_urdf(URDF_DEFAULT))
 
     @pytest.fixture
     def kin_3dof(self):
         from src.urdf_parser import parse_urdf
         from src.kinematics import RobotKinematics
         return RobotKinematics(parse_urdf(URDF_3DOF))
+
+    @pytest.fixture
+    def kin_1dof(self):
+        from src.urdf_parser import parse_urdf
+        from src.kinematics import RobotKinematics
+        return RobotKinematics(parse_urdf(URDF_1DOF))
 
     def _compare(self, kin, cache_dir, n_states=5):
         import shutil
@@ -227,6 +242,9 @@ class TestNEvsEL:
             tau_EL = Y_EL @ pi[kept]
             np.testing.assert_allclose(tau_NE, tau_EL, atol=1e-10)
 
+    def test_default_rrbot(self, kin_default, tmp_path):
+        self._compare(kin_default, str(tmp_path / "el_cache_default"))
+
     def test_1dof(self, kin_1dof, tmp_path):
         self._compare(kin_1dof, str(tmp_path / "el_cache_1"))
 
@@ -246,13 +264,13 @@ class TestBaseParameters:
         from src.dynamics_newton_euler import newton_euler_regressor
         from src.base_parameters import compute_base_parameters
 
-        kin = RobotKinematics(parse_urdf(URDF_3DOF))
+        kin = RobotKinematics(parse_urdf(URDF_DEFAULT))
         rng = np.random.default_rng(99)
         rows = []
         for _ in range(80):
-            q = rng.uniform(-1, 1, 3)
-            dq = rng.uniform(-2, 2, 3)
-            ddq = rng.uniform(-3, 3, 3)
+            q = rng.uniform(-1, 1, kin.nDoF)
+            dq = rng.uniform(-2, 2, kin.nDoF)
+            ddq = rng.uniform(-3, 3, kin.nDoF)
             rows.append(newton_euler_regressor(kin, q, dq, ddq))
         W = np.vstack(rows)
         pi = kin.PI.flatten()
@@ -266,13 +284,13 @@ class TestBaseParameters:
         from src.dynamics_newton_euler import newton_euler_regressor
         from src.base_parameters import compute_base_parameters
 
-        kin = RobotKinematics(parse_urdf(URDF_3DOF))
+        kin = RobotKinematics(parse_urdf(URDF_DEFAULT))
         rng = np.random.default_rng(77)
         rows = []
         for _ in range(80):
-            q = rng.uniform(-1, 1, 3)
-            dq = rng.uniform(-2, 2, 3)
-            ddq = rng.uniform(-3, 3, 3)
+            q = rng.uniform(-1, 1, kin.nDoF)
+            dq = rng.uniform(-2, 2, kin.nDoF)
+            ddq = rng.uniform(-3, 3, kin.nDoF)
             rows.append(newton_euler_regressor(kin, q, dq, ddq))
         W = np.vstack(rows)
         pi = kin.PI.flatten()
@@ -414,7 +432,10 @@ class TestSampleSufficiency:
 
 class TestPipelineSmoke:
     def _make_config(self, tmp_path, urdf, method="newton_euler",
-                     n_dof=1, feasibility="none"):
+                     n_dof=None, feasibility="none"):
+        from src.urdf_parser import parse_urdf
+        if n_dof is None:
+            n_dof = parse_urdf(urdf).nDoF
         cfg = {
             "urdf_path": urdf,
             "output_dir": str(tmp_path / "out"),
@@ -449,18 +470,27 @@ class TestPipelineSmoke:
         cfg_path.write_text(json.dumps(cfg))
         return str(cfg_path)
 
-    def test_ne_1dof(self, tmp_path):
+    def test_ne_default_rrbot(self, tmp_path):
         from src.pipeline import SystemIdentificationPipeline
-        cfg = self._make_config(tmp_path, URDF_1DOF)
+        cfg = self._make_config(tmp_path, URDF_DEFAULT)
         pipe = SystemIdentificationPipeline(cfg)
         pipe.run()
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),
                           allow_pickle=True)
         assert results["residual"] < 1e-8
 
-    def test_el_1dof(self, tmp_path):
+    def test_el_default_rrbot(self, tmp_path):
         from src.pipeline import SystemIdentificationPipeline
-        cfg = self._make_config(tmp_path, URDF_1DOF, method="euler_lagrange")
+        cfg = self._make_config(tmp_path, URDF_DEFAULT, method="euler_lagrange")
+        pipe = SystemIdentificationPipeline(cfg)
+        pipe.run()
+        results = np.load(str(tmp_path / "out" / "identification_results.npz"),
+                          allow_pickle=True)
+        assert results["residual"] < 1e-8
+
+    def test_ne_1dof(self, tmp_path):
+        from src.pipeline import SystemIdentificationPipeline
+        cfg = self._make_config(tmp_path, URDF_1DOF, n_dof=1)
         pipe = SystemIdentificationPipeline(cfg)
         pipe.run()
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),
@@ -480,7 +510,7 @@ class TestPipelineSmoke:
         """Constrained identification with LMI must produce pseudo-inertia PSD result."""
         from src.pipeline import SystemIdentificationPipeline
         from src.feasibility import is_pseudo_inertia_psd
-        cfg = self._make_config(tmp_path, URDF_1DOF, feasibility="lmi")
+        cfg = self._make_config(tmp_path, URDF_DEFAULT, feasibility="lmi")
         pipe = SystemIdentificationPipeline(cfg)
         pipe.run()
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),

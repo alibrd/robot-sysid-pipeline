@@ -84,12 +84,12 @@ The test suite (`tests/test_pipeline.py`) verifies:
 
 - **URDF parsing** — chain extraction, `Tw_0` base transform, topological ordering
 - **Trajectory boundary conditions** — `q(0) = q0`, `dq(0) = 0` for all basis/phase combinations; sine integer-period endpoint guarantee; config rejection of non-integer sine periods; EL+constrained identification rejected; `cholesky` normalised to `lmi` with deprecation warning
-- **NE / EL equivalence** — Newton-Euler and Euler-Lagrange regressors produce matching torques (1-DoF and 3-DoF)
+- **NE / EL equivalence** — Newton-Euler and Euler-Lagrange regressors produce matching torques (default RRBot + SC fixtures)
 - **Base parameter reduction** — observation equation preserved after QR reduction; `pinv(P)` reconstruction consistency
 - **Filtering** — passthrough when disabled; lowpass attenuation of high-frequency components
 - **Pseudo-inertia feasibility** — physically valid params pass; negative mass fails; large-first-moment-tiny-mass case correctly detected as infeasible via pseudo-inertia; projection produces PSD pseudo-inertia
 - **Sample sufficiency** — insufficient samples raise an error
-- **End-to-end pipeline** — smoke tests for NE/EL 1-DoF and 3-DoF; constrained identification verifies pseudo-inertia PSD on output
+- **End-to-end pipeline** — default smoke tests use RRBot (`tests/assets/RRBot_single.urdf`), while SC_1DoF and SC_3DoF fixtures remain covered for compatibility/scalability checks
 
 The documentation-linked verification layer lives in:
 
