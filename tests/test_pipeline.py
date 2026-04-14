@@ -173,8 +173,8 @@ class TestTrajectoryBoundary:
             finally:
                 os.unlink(tmp)
 
-    def test_cholesky_normalized_to_lmi(self):
-        """Config validation normalizes 'cholesky' to 'lmi' with deprecation warning."""
+    def test_cholesky_accepted_as_distinct_method(self):
+        """Config validation accepts 'cholesky' as a distinct feasibility method."""
         from src.config_loader import load_config
         import tempfile, os, warnings
         cfg_data = {
@@ -191,10 +191,9 @@ class TestTrajectoryBoundary:
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 cfg = load_config(tmp)
-                assert cfg["identification"]["feasibility_method"] == "lmi"
+                assert cfg["identification"]["feasibility_method"] == "cholesky"
                 dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-                assert len(dep_warnings) == 1
-                assert "deprecated" in str(dep_warnings[0].message).lower()
+                assert len(dep_warnings) == 0
         finally:
             os.unlink(tmp)
 
@@ -393,6 +392,28 @@ class TestFeasibility:
         pi = np.array([1.0, 0, 0, 0, I_val, 0, 0, I_val, 0, I_val])
         assert is_pseudo_inertia_psd(pi)
 
+    def test_pi_from_pseudo_inertia_roundtrip(self):
+        """pi → J → pi must recover the original parameter vector."""
+        from src.feasibility import pseudo_inertia_matrix, pi_from_pseudo_inertia_matrix
+        pi = np.array([2.5, 0.1, -0.2, 0.05, 0.3, 0.01, -0.02, 0.25, 0.005, 0.35])
+        J = pseudo_inertia_matrix(pi)
+        pi_back = pi_from_pseudo_inertia_matrix(J)
+        np.testing.assert_allclose(pi_back, pi, atol=1e-14)
+
+    def test_cholesky_solver_guarantees_psd(self):
+        """Parameters produced by the Cholesky solver path must have J ≽ 0."""
+        from src.solver import _solve_cholesky, _cholesky_vec_to_lower, _lower_to_cholesky_vec
+        from src.feasibility import pseudo_inertia_matrix, is_pseudo_inertia_psd
+        nDoF = 1
+        # Construct a small synthetic problem
+        rng = np.random.default_rng(42)
+        W = rng.standard_normal((30, 10))
+        tau = rng.standard_normal(30)
+        P_mat = np.eye(10)
+        pi_hat, res, info = _solve_cholesky(W, tau, nDoF, "ols", None, P_mat)
+        assert info["solved_in_full_space"]
+        assert is_pseudo_inertia_psd(pi_hat[:10])
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 7. Insufficient sample handling
@@ -518,6 +539,20 @@ class TestPipelineSmoke:
         assert float(results["residual"]) < 1.0
         pi = results["pi_identified"]
         # The identified model or its correction must pass pseudo-inertia PSD
+        pi_corrected = results["pi_corrected"]
+        if len(pi_corrected) >= 10:
+            assert is_pseudo_inertia_psd(pi_corrected[:10])
+
+    def test_cholesky_constrained_produces_feasible_model(self, tmp_path):
+        """Cholesky reparameterisation must produce pseudo-inertia PSD result."""
+        from src.pipeline import SystemIdentificationPipeline
+        from src.feasibility import is_pseudo_inertia_psd
+        cfg = self._make_config(tmp_path, URDF_DEFAULT, feasibility="cholesky")
+        pipe = SystemIdentificationPipeline(cfg)
+        pipe.run()
+        results = np.load(str(tmp_path / "out" / "identification_results.npz"),
+                          allow_pickle=True)
+        assert float(results["residual"]) < 1.0
         pi_corrected = results["pi_corrected"]
         if len(pi_corrected) >= 10:
             assert is_pseudo_inertia_psd(pi_corrected[:10])

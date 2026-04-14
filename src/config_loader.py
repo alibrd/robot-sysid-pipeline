@@ -1,6 +1,5 @@
 """Load and validate the JSON configuration file."""
 import json
-import warnings
 from copy import deepcopy
 from pathlib import Path
 
@@ -111,26 +110,14 @@ def _validate(cfg: dict, path: str):
     if ident["feasibility_method"] not in _VALID_FEASIBILITY:
         raise ValueError(f"'feasibility_method' must be one of {_VALID_FEASIBILITY}")
 
-    # Normalize: "cholesky" is a deprecated alias for "lmi" (same implementation)
-    if ident["feasibility_method"] == "cholesky":
-        warnings.warn(
-            "feasibility_method='cholesky' is a deprecated alias for 'lmi'. "
-            "No separate Cholesky-factored reparameterisation is implemented; "
-            "both use eigenvalue-clipping projection of the pseudo-inertia "
-            "matrix. Use 'lmi' directly.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        ident["feasibility_method"] = "lmi"
-
     # Constrained identification requires full 10-per-link parameter blocks,
     # which are only available with the newton_euler regressor.  The EL
     # regressor drops zero columns, producing a reduced vector that cannot
     # be mapped back to per-link pseudo-inertia constraints.
     if cfg["method"] == "euler_lagrange" and ident["feasibility_method"] != "none":
         raise ValueError(
-            "Constrained identification (feasibility_method='lmi') is not "
-            "supported with the euler_lagrange method. The EL regressor "
+            "Constrained identification (feasibility_method='lmi'/'cholesky') "
+            "is not supported with the euler_lagrange method. The EL regressor "
             "produces a reduced parameter vector that cannot be mapped to "
             "per-link pseudo-inertia constraints. Use method='newton_euler' "
             "for constrained identification, or set feasibility_method='none'."

@@ -36,8 +36,8 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 | QR-based base-parameter reduction | Supported |
 | OLS / WLS / bounded least squares | Supported |
 | Pseudo-inertia feasibility check | Supported |
-| Constrained identification with pseudo-inertia PSD | Supported for `newton_euler` only |
-| Separate Cholesky-style feasibility reparameterization | **Not implemented** |
+| Constrained identification with pseudo-inertia PSD (LMI) | Supported for `newton_euler` only |
+| Cholesky-factored feasibility reparameterization | Supported for `newton_euler` only |
 | Cartesian / workspace / torque excitation constraints | **Not implemented** |
 | Automatic differentiation from raw $q$ to $\dot q,\ddot q$ | **Not implemented**; external data must provide `dq` and `ddq` |
 
@@ -582,7 +582,9 @@ $$
 
 This criterion implies positive mass, a positive-semidefinite inertia tensor, and the triangle inequalities on the principal moments. See Sousa and Cortesão (2014) and Wensing, Kim, and Slotine (2018).
 
-The constrained identification problem used by the Newton-Euler branch is
+The constrained identification problem used by the Newton-Euler branch has two solver paths.
+
+**LMI path** (`feasibility_method="lmi"`): explicit eigenvalue inequality constraints solved via SLSQP:
 
 $$
 \min_{\pi_{full}} \frac{1}{2}\|W_b P \pi_{full} - \tau\|_2^2
@@ -591,25 +593,37 @@ $$
 \ \forall i.
 $$
 
+**Cholesky path** (`feasibility_method="cholesky"`): reparameterises each link's pseudo-inertia as $J_i = L_i L_i^\top$ with $L_i$ lower-triangular, which guarantees $J_i \succeq 0$ by construction. The optimisation is unconstrained in L-space (L-BFGS-B with box bounds $L_{ii} \ge \varepsilon$ for strict positive-definiteness):
+
+$$
+\min_{L_1,\ldots,L_n,\,\pi_{extra}} \frac{1}{2}\|W_b P \,\pi_{full}(L_1,\ldots,L_n,\pi_{extra}) - \tau\|_2^2,
+$$
+
+where $\pi_{full}$ is reconstructed from each link's $J_i = L_i L_i^\top$ via the standard pseudo-inertia extraction. The analytical gradient is computed through the chain $L_{\text{vec}} \to L \to J = LL^\top \to \pi_i$. This approach follows Traversaro, Brossette, Escande, and Nori (2016).
+
 ### Code path
-- Feasibility checks and PSD projection: [`src/feasibility.py`](../src/feasibility.py)
-- Constrained solver: [`src/solver.py`](../src/solver.py)
-- Config validation and `cholesky` alias handling: [`src/config_loader.py`](../src/config_loader.py)
+- Feasibility checks, PSD projection, and parameter extraction: [`src/feasibility.py`](../src/feasibility.py)
+- Constrained solver (LMI via SLSQP, Cholesky via L-BFGS-B): [`src/solver.py`](../src/solver.py)
+- Config validation: [`src/config_loader.py`](../src/config_loader.py)
 
 The code offers:
 - post-hoc feasibility diagnostics for any parameter vector with complete 10-parameter link blocks,
-- constrained full-space SLSQP with pseudo-inertia eigenvalue constraints for `method="newton_euler"`,
+- constrained full-space SLSQP with pseudo-inertia eigenvalue constraints (`"lmi"`) for `method="newton_euler"`,
+- Cholesky-reparameterised unconstrained L-BFGS-B optimisation (`"cholesky"`) for `method="newton_euler"`,
 - PSD projection by eigenvalue clipping when post-hoc correction is requested.
 
 ### Verification evidence
 - Standard rigid-body failure diagnostics: `test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures`
 - EL rejection for constrained feasibility: `test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes`
 - Constrained NE run that returns a feasible pseudo-inertia model: `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model`
+- Pseudo-inertia roundtrip extraction: `test_pi_from_pseudo_inertia_roundtrip`
+- Cholesky solver guarantees PSD output: `test_cholesky_solver_guarantees_psd`
+- End-to-end Cholesky-constrained pipeline: `test_cholesky_constrained_produces_feasible_model`
 
 ### Current implementation note
-- `feasibility_method="cholesky"` is **not** a separate algorithm. The config loader normalizes it to `lmi` and emits a deprecation warning.
-- True Cholesky- or manifold-parameterized physical-consistency optimization, as in Traversaro et al. (2016), is not implemented.
-- The EL branch cannot use the constrained feasibility path because its reduced symbolic regressor cannot be mapped back to full per-link 10-parameter blocks in the current implementation.
+- `feasibility_method="lmi"` uses SLSQP with explicit eigenvalue inequality constraints on $J_i$.
+- `feasibility_method="cholesky"` reparameterises $J_i = L_i L_i^\top$ and uses unconstrained L-BFGS-B with analytical gradients, following Traversaro et al. (2016). This guarantees $J_i \succeq 0$ by construction throughout optimisation.
+- The EL branch cannot use either constrained feasibility path because its reduced symbolic regressor cannot be mapped back to full per-link 10-parameter blocks in the current implementation.
 - If a reduced parameter vector has fewer than $10n$ entries, `check_feasibility()` cannot perform complete per-link pseudo-inertia checks on missing blocks.
 
 ## Stage 12. Save Outputs, Write Logs, and Interpret Success Correctly
@@ -636,7 +650,8 @@ This distinction is scientifically important. The log file tells you whether the
 
 ### Verification evidence
 - Unconstrained successful run with infeasible result: `test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run`
-- Constrained feasible run: `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model`
+- Constrained LMI feasible run: `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model`
+- Constrained Cholesky feasible run: `test_cholesky_constrained_produces_feasible_model`
 
 ## Traceability Appendix
 
@@ -657,7 +672,8 @@ This distinction is scientifically important. The log file tells you whether the
 | 11 | Pseudo-inertia detects physically invalid bodies | [`src/feasibility.py`](../src/feasibility.py) | `test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures` |
 | 11 | EL constrained feasibility modes are rejected honestly | [`src/config_loader.py`](../src/config_loader.py) | `test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes` |
 | 12 | Successful execution is distinct from physical feasibility | [`src/pipeline.py`](../src/pipeline.py) | `test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run` |
-| 12 | Constrained NE identification can return a feasible model | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model` |
+| 12 | Constrained NE identification can return a feasible model (LMI) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model` |
+| 12 | Constrained NE identification can return a feasible model (Cholesky) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_cholesky_constrained_produces_feasible_model` |
 
 ## References
 

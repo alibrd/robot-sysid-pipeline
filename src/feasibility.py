@@ -12,10 +12,14 @@ J ≽ 0 implies (and is stronger than) positive mass, inertia PSD, and
 triangle inequalities combined.  See Sousa & Cortesão (2014) and
 Wensing, Kim & Slotine (2018).
 
-Post-hoc projection method:
-  - "lmi" : eigenvalue-clipping of each link's pseudo-inertia J onto
-            the PSD cone.  ("cholesky" is a deprecated alias for the
-            same projection — no true Cholesky reparameterisation exists.)
+Feasibility enforcement methods:
+  - "lmi" : eigenvalue-clipping projection of each link's pseudo-inertia
+            J onto the PSD cone, combined with SLSQP-constrained optimisation
+            in the solver.
+  - "cholesky" : Cholesky-factored reparameterisation.  Each link's
+            pseudo-inertia is written as J = L Lᵀ with L lower-triangular,
+            guaranteeing J ≽ 0 by construction during optimisation.  Post-hoc
+            projection (if needed) uses eigenvalue-clipping.
 """
 import logging
 import numpy as np
@@ -24,6 +28,28 @@ logger = logging.getLogger("sysid_pipeline")
 
 
 # ── Public helpers ─────────────────────────────────────────────────────
+
+def pi_from_pseudo_inertia_matrix(J: np.ndarray) -> np.ndarray:
+    """Extract a 10-element parameter block from a 4×4 pseudo-inertia matrix.
+
+    Inverse of :func:`pseudo_inertia_matrix`.
+
+    Returns
+    -------
+    pi_link : [m, mx, my, mz, Ixx, Ixy, Ixz, Iyy, Iyz, Izz]
+    """
+    m   = J[3, 3]
+    hx  = J[0, 3]
+    hy  = J[1, 3]
+    hz  = J[2, 3]
+    Ixx = J[1, 1] + J[2, 2]
+    Iyy = J[0, 0] + J[2, 2]
+    Izz = J[0, 0] + J[1, 1]
+    Ixy = -J[0, 1]
+    Ixz = -J[0, 2]
+    Iyz = -J[1, 2]
+    return np.array([m, hx, hy, hz, Ixx, Ixy, Ixz, Iyy, Iyz, Izz])
+
 
 def pseudo_inertia_matrix(pi_link: np.ndarray) -> np.ndarray:
     """Build the 4×4 pseudo-inertia matrix from a 10-element parameter block.
@@ -166,30 +192,7 @@ def _project_pseudo_inertia(pi, nDoF, report):
         eigvals_clipped = np.maximum(eigvals, eps_min)
         J_fixed = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
 
-        # Extract corrected parameters from J_fixed
-        # sigma = J[0,0] + J[1,1] + J[2,2]  (since sum of diag of upper-left 3x3)
-        sigma = J_fixed[0, 0] + J_fixed[1, 1] + J_fixed[2, 2]
-        Ixx_new = sigma - J_fixed[0, 0]
-        Iyy_new = sigma - J_fixed[1, 1]
-        Izz_new = sigma - J_fixed[2, 2]
-        Ixy_new = -J_fixed[0, 1]
-        Ixz_new = -J_fixed[0, 2]
-        Iyz_new = -J_fixed[1, 2]
-        hx_new  = J_fixed[0, 3]
-        hy_new  = J_fixed[1, 3]
-        hz_new  = J_fixed[2, 3]
-        m_new   = J_fixed[3, 3]
-
-        pi_out[base + 0] = m_new
-        pi_out[base + 1] = hx_new
-        pi_out[base + 2] = hy_new
-        pi_out[base + 3] = hz_new
-        pi_out[base + 4] = Ixx_new
-        pi_out[base + 5] = Ixy_new
-        pi_out[base + 6] = Ixz_new
-        pi_out[base + 7] = Iyy_new
-        pi_out[base + 8] = Iyz_new
-        pi_out[base + 9] = Izz_new
+        pi_out[base:base + 10] = pi_from_pseudo_inertia_matrix(J_fixed)
         logger.debug("Link %d: pseudo-inertia projected. New J eigenvalues: %s",
                      i + 1, eigvals_clipped)
 
