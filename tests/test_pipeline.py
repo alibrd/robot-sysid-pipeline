@@ -521,3 +521,16 @@ class TestPipelineSmoke:
         pi_corrected = results["pi_corrected"]
         if len(pi_corrected) >= 10:
             assert is_pseudo_inertia_psd(pi_corrected[:10])
+
+    @pytest.mark.parametrize("urdf,n_dof", [
+        (URDF_1DOF, 1),
+        (URDF_3DOF, 3),
+    ])
+    def test_ne_sc_models_remain_functional(self, tmp_path, urdf, n_dof):
+        from src.pipeline import SystemIdentificationPipeline
+        cfg = self._make_config(tmp_path, urdf, n_dof=n_dof)
+        pipe = SystemIdentificationPipeline(cfg)
+        pipe.run()
+        results = np.load(str(tmp_path / "out" / "identification_results.npz"),
+                          allow_pickle=True)
+        assert results["residual"] < 1e-6

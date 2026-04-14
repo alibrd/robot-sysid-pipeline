@@ -37,6 +37,10 @@ docs/pipeline_theory_and_validation.pdf
 # Binary/data outputs
 *.npz
 
+# Configuration files
+config/*
+!config/default_*.json
+
 # Temporary outputs and generated files
 tmp_output/
 tmp_*.json

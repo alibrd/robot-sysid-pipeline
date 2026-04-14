@@ -15,6 +15,32 @@ relevant literature, and maps each equation to implementation and tests.
 python run_pipeline.py config/my_robot.json
 ```
 
+For standalone PyBullet torque validation against a saved excitation artifact:
+
+```bash
+python run_pybullet_validation.py config/my_pybullet_validation.json
+```
+
+To export a Markdown summary, CSV table, and per-joint torque/error plots from an
+existing validation run:
+
+```bash
+python run_pybullet_validation_report.py tmp_output/pybullet_validation/<robot_name>
+```
+
+To aggregate multiple validation runs into one benchmark CSV/Markdown table:
+
+```bash
+python run_pybullet_validation_benchmark.py tmp_output/pybullet_validation
+```
+
+To automate pipeline execution plus optional validation/report/benchmark stages
+from one orchestration config:
+
+```bash
+python run_workflow.py config/my_workflow.json
+```
+
 ## JSON configuration
 
 Copy `config/default_config.json` and fill in the fields. Key settings:
@@ -62,11 +88,37 @@ All outputs are written to `output_dir`:
 - `identification_results.npz` — identified parameters, P matrix, residuals
 - `results_summary.json` — human-readable summary
 
+The standalone PyBullet validator writes outputs to
+`<output_dir>/<robot_name>/`:
+
+- `pybullet_validation.log` — validation log
+- `pybullet_validation_data.npz` — replayed trajectory, reference torques, PyBullet torques, and errors
+- `pybullet_validation_summary.json` — pass/fail summary and comparison metrics
+- `pybullet_validation_report.md` — report-ready Markdown summary (via report exporter)
+- `pybullet_validation_metrics.csv` — flat per-joint metrics table (via report exporter)
+- `torque_overlay_<joint>.png` and `torque_abs_error_<joint>.png` — report plots (via report exporter)
+
+At a root directory containing several validation run folders, the benchmark
+exporter writes:
+
+- `pybullet_validation_benchmark.csv` — one row per validation run
+- `pybullet_validation_benchmark.md` — compact multi-run benchmark summary
+
 ## Dependencies
 
 - Python ≥ 3.9
 - NumPy, SciPy, SymPy
 - pytest (for testing)
+- `pybullet` (optional, only for standalone simulator validation)
+
+Install the optional validation dependency with:
+
+```bash
+pip install pybullet
+```
+
+For report export plots, install `matplotlib` in the same environment that runs
+`run_pybullet_validation_report.py`.
 
 ## Testing
 
@@ -79,6 +131,81 @@ For the slower symbolic and conditioning checks:
 ```bash
 python -m pytest tests/ --run-slow -m slow -v
 ```
+
+PyBullet validation tests are optional and are skipped automatically when
+`pybullet` is not installed.
+
+## PyBullet validation config
+
+Use `config/default_pybullet_validation_config.json` as the template for the
+standalone validation workflow. The validator depends on the excitation artifact
+contract written by the main pipeline, specifically these fields in
+`excitation_trajectory.npz`:
+
+- `params`
+- `freqs`
+- `q0`
+- `basis`
+- `optimize_phase`
+
+The validator replays the excitation with the existing Fourier trajectory code,
+computes reference torques with the Newton-Euler regressor, computes PyBullet
+inverse-dynamics torques in `DIRECT` mode, and compares both sample-by-sample.
+
+### What validation proves
+
+- **Demonstrates**: regressor correctness, URDF-parsing consistency, parameter-packing consistency
+- **Does not demonstrate**: identification quality, friction modeling, generalization to other trajectories
+
+Together with the synthetic-data identification tests (which verify zero
+residual when the true parameters are known), the validation provides evidence
+that the full pipeline — URDF parsing, regressor construction, excitation
+replay, and identification — is implemented correctly.  Neither the validation
+nor the smoke tests alone are sufficient to prove identification accuracy on
+real measured data.
+
+## Workflow automation config
+
+Use `config/default_workflow_config.json` as the template for the optional
+workflow runner. This orchestration layer keeps the main pipeline independent
+from PyBullet while still allowing one-command automation.
+
+The workflow config supports:
+
+- `run_pipeline`
+- `run_validation`
+- `run_report`
+- `run_benchmark`
+- `allow_missing_optional_dependencies`
+- `output_root`
+- `pipeline.config_path`
+- `validation.config_path`
+- `validation.auto_from_pipeline`
+- `validation.use_external_artifacts`
+- `report.validation_dir`
+- `benchmark.validation_root`
+
+When both `run_pipeline=true` and `run_validation=true`, the default behavior is
+`validation.auto_from_pipeline=true`. In that mode, the workflow runner derives:
+
+- `validation.urdf_path` from the pipeline config
+- `validation.excitation_file` from `<pipeline_output_dir>/excitation_trajectory.npz`
+- `validation.base_frequency_hz` from the pipeline excitation config
+- `validation.trajectory_duration_periods` from the pipeline excitation config
+
+This means users can keep pipeline and validation configs separate without
+manually duplicating the URDF/excitation linkage in the common case.
+
+If `output_root` is set, it overrides stage output locations as follows:
+
+- pipeline output: `<output_root>/pipeline/<pipeline_config_stem>`
+- validation output root: `<output_root>/validation`
+- benchmark output root: `<output_root>/validation`
+
+The workflow runner performs fail-fast preflight checks before execution. For
+example, it rejects missing required stage inputs, mismatched pipeline/validation
+URDFs, and validation runs that point to a different excitation artifact than
+the just-run pipeline output unless `validation.use_external_artifacts=true`.
 
 The test suite (`tests/test_pipeline.py`) verifies:
 
@@ -114,6 +241,7 @@ The documentation-linked verification layer lives in:
 | `friction.py` | Friction model parameter augmentation |
 | `pipeline.py` | Main orchestrator tying all stages together |
 | `config_loader.py` | JSON config loading with defaults |
+| `workflow.py` | Optional orchestration across pipeline, validation, report, benchmark |
 | `math_utils.py` | Rotation matrices, skew-symmetric, constants |
 
 ## Limitations and future work

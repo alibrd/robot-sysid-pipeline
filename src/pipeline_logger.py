@@ -4,10 +4,12 @@ import sys
 from pathlib import Path
 
 
-def setup_logger(output_dir: str, name: str = "sysid_pipeline") -> logging.Logger:
+def setup_logger(output_dir: str,
+                 name: str = "sysid_pipeline",
+                 log_filename: str = "pipeline.log") -> logging.Logger:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    log_file = output_path / "pipeline.log"
+    log_file = output_path / log_filename
 
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)

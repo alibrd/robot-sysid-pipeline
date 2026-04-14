@@ -1,0 +1,15 @@
+{
+  "urdf_path": "",
+  "excitation_file": "",
+  "output_dir": "tmp_output/pybullet_validation",
+  "base_frequency_hz": 0.2,
+  "trajectory_duration_periods": 1,
+  "sample_rate_hz": 0,
+  "gravity": [0.0, 0.0, -9.80665],
+  "use_fixed_base": true,
+  "joint_name_order": null,
+  "comparison": {
+    "tolerance_abs": 0.001,
+    "tolerance_normalized_rms": 0.001
+  }
+}

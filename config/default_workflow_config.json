@@ -1,0 +1,22 @@
+{
+  "run_pipeline": true,
+  "run_validation": true,
+  "run_report": true,
+  "run_benchmark": false,
+  "allow_missing_optional_dependencies": false,
+  "output_root": null,
+  "pipeline": {
+    "config_path": null
+  },
+  "validation": {
+    "config_path": null,
+    "auto_from_pipeline": null,
+    "use_external_artifacts": false
+  },
+  "report": {
+    "validation_dir": null
+  },
+  "benchmark": {
+    "validation_root": null
+  }
+}

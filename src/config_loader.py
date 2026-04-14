@@ -1,7 +1,10 @@
 """Load and validate the JSON configuration file."""
 import json
 import warnings
+from copy import deepcopy
 from pathlib import Path
+
+from .config_utils import deep_merge, resolve_path_value
 
 _VALID_METHODS = {"newton_euler", "euler_lagrange"}
 _VALID_BASIS = {"cosine", "sine", "both"}
@@ -11,28 +14,63 @@ _VALID_SOLVERS = {"ols", "wls", "bounded_ls"}
 _VALID_FEASIBILITY = {"none", "lmi", "cholesky"}
 
 
-def load_config(config_path: str) -> dict:
-    """Load user JSON config, merge with defaults, and validate."""
+def load_default_config() -> dict:
+    """Load the repository default pipeline config."""
     default_path = Path(__file__).resolve().parent.parent / "config" / "default_config.json"
-    with open(default_path, "r") as f:
-        defaults = json.load(f)
+    with open(default_path, "r", encoding="utf-8-sig") as f:
+        return json.load(f)
 
-    with open(config_path, "r") as f:
+
+def load_config(config_path: str) -> dict:
+    """Load a pipeline config file, merge defaults, resolve paths, and validate."""
+    config_file = Path(config_path).resolve()
+    with open(config_file, "r", encoding="utf-8-sig") as f:
         user_cfg = json.load(f)
 
-    cfg = _deep_merge(defaults, user_cfg)
-    _validate(cfg, config_path)
+    return load_config_dict(
+        user_cfg,
+        config_path=str(config_file),
+        resolve_relative_to=config_file.parent,
+        validate=True,
+    )
+
+
+def load_config_dict(user_cfg: dict,
+                     config_path: str = "<inline>",
+                     resolve_relative_to: str | Path | None = None,
+                     validate: bool = True) -> dict:
+    """Merge a pipeline config dict with defaults, resolve paths, and validate.
+
+    Warning: when *resolve_relative_to* is None (default), relative paths in
+    the config dict are **not** resolved and may cause FileNotFoundError at
+    runtime.  Pass the directory containing the config file to enable path
+    resolution.
+    """
+    defaults = load_default_config()
+    cfg = deep_merge(defaults, deepcopy(user_cfg))
+    cfg = _resolve_paths(cfg, resolve_relative_to)
+    if validate:
+        _validate(cfg, config_path)
     return cfg
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    merged = base.copy()
-    for k, v in override.items():
-        if isinstance(v, dict) and isinstance(merged.get(k), dict):
-            merged[k] = _deep_merge(merged[k], v)
-        else:
-            merged[k] = v
-    return merged
+def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
+    """Resolve path-valued fields relative to the given config directory."""
+    if resolve_relative_to is None:
+        return cfg
+
+    base_dir = Path(resolve_relative_to).resolve()
+    resolved = deepcopy(cfg)
+    resolved["urdf_path"] = resolve_path_value(resolved.get("urdf_path"), base_dir)
+    resolved["output_dir"] = resolve_path_value(resolved.get("output_dir"), base_dir)
+
+    identification = resolved.get("identification", {})
+    identification["data_file"] = resolve_path_value(
+        identification.get("data_file"),
+        base_dir,
+    )
+    resolved["identification"] = identification
+    return resolved
 
 
 def _validate(cfg: dict, path: str):

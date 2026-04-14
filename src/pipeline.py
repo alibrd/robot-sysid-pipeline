@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config_loader import load_config
+from .config_loader import load_config, load_config_dict
 from .pipeline_logger import setup_logger
 from .urdf_parser import parse_urdf, extract_joint_limits
 from .kinematics import RobotKinematics
@@ -25,8 +25,11 @@ from .feasibility import check_feasibility
 class SystemIdentificationPipeline:
     """End-to-end robot system identification pipeline."""
 
-    def __init__(self, config_path: str):
-        self.cfg = load_config(config_path)
+    def __init__(self, config_path: str | dict):
+        if isinstance(config_path, dict):
+            self.cfg = load_config_dict(config_path)
+        else:
+            self.cfg = load_config(config_path)
         self.output_dir = Path(self.cfg["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = setup_logger(str(self.output_dir))
