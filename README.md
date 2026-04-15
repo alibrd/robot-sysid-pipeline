@@ -75,7 +75,7 @@ Copy `config/default_config.json` and fill in the fields. Key settings:
 6. **Data generation** -- synthetic from regressor or load external `.npz`
 7. **Observation matrix** -- stack regressors, optional Butterworth zero-phase filtering & downsampling. Raises an error if the number of equations is fewer than the number of unknowns
 8. **Base parameters** -- QR-based reduction (scipy column-pivoted QR) to identifiable parameter set
-9. **Identification** -- OLS / WLS (IRLS-weighted) / bounded LS. When `feasibility_method` is `"lmi"`, SLSQP is used with per-link **pseudo-inertia PSD** eigenvalue constraints (Wensing et al. 2018). When `"cholesky"`, each link's pseudo-inertia is reparameterised as $J = LL^\top$ (L lower-triangular), guaranteeing PSD by construction, and optimised with L-BFGS-B (Traversaro et al. 2016). Both require `method=newton_euler`; the Euler-Lagrange regressor drops zero columns, producing a reduced parameter vector that cannot be mapped to per-link constraints
+9. **Identification** -- OLS / WLS (IRLS-weighted) / bounded LS. When `feasibility_method` is `"lmi"`, SLSQP is used with per-link **pseudo-inertia PSD** eigenvalue constraints (Wensing et al. 2018). When `"cholesky"`, each link's pseudo-inertia is reparameterised as $J = LL^\top$ (L lower-triangular), guaranteeing PSD by construction, and optimised with L-BFGS-B (Traversaro et al. 2016). Both require `method=newton_euler`; the Euler-Lagrange regressor drops structurally zero columns, producing a reduced parameter vector that cannot be mapped to per-link constraints
 10. **Feasibility check** -- pseudo-inertia PSD per link (the necessary-and-sufficient condition for physical consistency). Subsumes positive mass, inertia PSD, and triangle inequality checks, which are reported for diagnostics
 11. **Results** -- `.npz` + JSON summary + log file
 
@@ -247,7 +247,7 @@ The documentation-linked verification layer lives in:
 ## Limitations and future work
 
 - **Excitation constraints**: only joint-space limits (position, velocity, acceleration) are enforced. Cartesian/workspace and torque constraints are not implemented
-- **Constrained identification**: requires `method=newton_euler`. The Euler-Lagrange regressor drops zero columns, so the reduced parameter vector cannot be mapped to per-link pseudo-inertia constraints. The config validator rejects `method=euler_lagrange` with `feasibility_method != "none"`
+- **Constrained identification**: requires `method=newton_euler`. The Euler-Lagrange regressor drops structurally zero columns, so the reduced parameter vector cannot be mapped to per-link pseudo-inertia constraints. The config validator rejects `method=euler_lagrange` with `feasibility_method != "none"`
 - **Sine basis endpoint guarantee**: `dq(T) = 0` and `ddq(T) = 0` for sine-only basis hold only when `trajectory_duration_periods` is an integer. The config validator enforces this
 - **Friction models**: viscous, Coulomb, and combined friction augmentation is supported but the friction coefficients are treated as free parameters in the regressor — no special physical constraints are applied to them
 

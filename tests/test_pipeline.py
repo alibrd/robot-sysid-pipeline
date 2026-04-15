@@ -1,10 +1,12 @@
 """Pytest tests for the sysid_pipeline package."""
 import json
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pytest
+import sympy
 
 # Ensure the sysid_pipeline root is on the path
 ROOT = Path(__file__).resolve().parent.parent
@@ -244,6 +246,18 @@ class TestNEvsEL:
     def test_default_rrbot(self, kin_default, tmp_path):
         self._compare(kin_default, str(tmp_path / "el_cache_default"))
 
+    def test_builder_succeeds_with_deprecation_warnings_as_errors(self, kin_default, tmp_path):
+        from src.dynamics_euler_lagrange import euler_lagrange_regressor_builder
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            reg_fn, kept = euler_lagrange_regressor_builder(
+                kin_default, str(tmp_path / "el_cache_warning_guard")
+            )
+
+        assert callable(reg_fn)
+        assert len(kept) > 0
+
     def test_1dof(self, kin_1dof, tmp_path):
         self._compare(kin_1dof, str(tmp_path / "el_cache_1"))
 
@@ -297,6 +311,24 @@ class TestBaseParameters:
         W_base, P, kept, rank, pi_base = compute_base_parameters(W, pi)
         pi_recon = np.linalg.pinv(P) @ pi_base
         np.testing.assert_allclose(W @ pi_recon, W @ pi, atol=1e-10)
+
+
+class TestEulerLagrangeStructuralPruning:
+    def test_remove_zero_columns_prunes_only_structural_zeros(self):
+        from src.dynamics_euler_lagrange import _remove_zero_columns
+
+        x = sympy.Symbol("x")
+        Y = sympy.Matrix([
+            [sympy.S.Zero, x, sympy.sin(1)**2 + sympy.cos(1)**2 - 1],
+            [0, 2 * x, 0],
+        ])
+
+        reduced, kept = _remove_zero_columns(Y)
+
+        assert kept == [1, 2]
+        assert reduced.shape == (2, 2)
+        assert reduced[:, 0] == Y[:, 1]
+        assert reduced[:, 1] == Y[:, 2]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

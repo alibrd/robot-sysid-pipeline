@@ -225,10 +225,15 @@ def _differentiate_lagrangian(Y_L, q, dq, ddq):
 
 
 def _remove_zero_columns(Y):
-    """Drop columns that are identically zero, returning (Y_reduced, kept_indices)."""
+    """Drop columns whose entries are all structurally zero.
+
+    This intentionally avoids SymPy reasoning helpers such as ``equals`` or
+    ``is_zero``, which can trigger simplification/evaluation paths that emit
+    deprecation warnings under warning-as-error test runs.
+    """
     kept = []
     for j in range(Y.shape[1]):
-        if not Y[:, j].equals(sympy.zeros(Y.shape[0], 1)):
+        if any(entry is not sympy.S.Zero and entry != 0 for entry in Y[:, j]):
             kept.append(j)
     if not kept:
         return Y, list(range(Y.shape[1]))

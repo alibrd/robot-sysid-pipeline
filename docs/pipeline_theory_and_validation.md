@@ -232,7 +232,7 @@ The implementation:
 - rebuilds the symbolic transforms,
 - forms $Y_L$ one link at a time,
 - applies the Euler-Lagrange differentiation rule in `_differentiate_lagrangian()`,
-- removes symbolic zero columns,
+- removes structurally zero columns (columns whose entries are all literal zero, without invoking symbolic reasoning),
 - caches the symbolic regressor to disk and re-lambdifies it on load.
 
 ### Verification evidence
@@ -240,7 +240,7 @@ The implementation:
 - Broader 3-DoF random-state agreement: `test_slow_ne_el_regressors_match_across_random_3dof_states`
 
 ### Current implementation note
-The EL branch returns a reduced symbolic regressor after removing zero columns. That is mathematically fine for unconstrained identification, but it means the current EL path cannot support the per-link full-parameter feasibility constraints used by the pseudo-inertia method in Stage 11.
+The EL branch returns a reduced symbolic regressor after removing structurally zero columns (i.e. columns that are literal zero in their symbolic form, without invoking symbolic reasoning such as `equals` or `simplify`). Columns that are algebraically zero but not yet simplified are left in place and handled later by the numeric base-parameter reduction in Stage 9. This is mathematically fine for unconstrained identification, but it means the current EL path cannot support the per-link full-parameter feasibility constraints used by the pseudo-inertia method in Stage 11.
 
 ## Stage 6. Build the Excitation Trajectory and Choose an Optimization Style
 
