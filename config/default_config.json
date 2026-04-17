@@ -6,7 +6,8 @@
     "joint_limits": {
         "position": null,
         "velocity": null,
-        "acceleration": null
+        "acceleration": null,
+        "torque": null
     },
 
     "excitation": {
@@ -18,7 +19,27 @@
         "constraint_style": "literature_standard",
         "optimizer_max_iter": 300,
         "optimizer_pop_size": 15,
-        "trajectory_duration_periods": 1
+        "trajectory_duration_periods": 1,
+        "torque_constraint_method": "none",
+        "torque_validation_oversample_factor": 5,
+        "torque_constraint": {
+            "strict_validation": true,
+            "soft_penalty_weight": 100.0,
+            "soft_penalty_smoothing": 0.01,
+            "relative_uncertainty": 0.1,
+            "absolute_uncertainty_floor": 0.001,
+            "chance_confidence": 0.99,
+            "relative_stddev": 0.05,
+            "absolute_stddev_floor": 0.001,
+            "envelope_type": "constant",
+            "speed_linear_slope": 0.25,
+            "velocity_reference": 1.0,
+            "min_scale": 0.5,
+            "max_scale": 1.5,
+            "rms_limit_ratio": null,
+            "max_iterations": 3,
+            "convergence_tol": 0.01
+        }
     },
 
     "friction": {

@@ -1,49 +1,31 @@
-# Byte-compiled / caches
-__pycache__/
-*.py[cod]
-*$py.class
+/*
 
-# Virtual environments
-.env
-env/
-venv/
-.venv/
+!/.gitignore
+!/README.md
+!/run_pipeline.py
+!/run_pybullet_validation_benchmark.py
+!/run_pybullet_validation_report.py
+!/run_pybullet_validation.py
+!/run_workflow.py
 
-# Editors / IDEs
-.vscode/
-.idea/
+!/config/
+/config/*
+!/config/default_config.json
+!/config/default_pybullet_validation_config.json
+!/config/default_workflow_config.json
 
-# Build / packaging
-build/
-dist/
-*.egg-info/
-.eggs/
+!/docs/
+/docs/*
+!/docs/pipeline_theory_and_validation.md
 
-# Tests / coverage
-.pytest_cache/
-.coverage
-htmlcov/
+!/src/
+!/src/*
+src/__pycache__/
 
-# OS
-.DS_Store
-Thumbs.db
+!/tests/
+!/tests/*
+tests/__pycache__/
 
-# Logs
-*.log
-docs/pipeline_theory_and_validation.html
-docs/pipeline_theory_and_validation.pdf
-*.diff
-
-# Binary/data outputs
-*.npz
-
-# Configuration files
-config/*
-!config/default_*.json
-
-# Temporary outputs and generated files
-tmp_output/
-tmp_*.json
 tmp_*.npz
 tmp_*
 

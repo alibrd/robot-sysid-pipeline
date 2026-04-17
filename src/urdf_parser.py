@@ -261,6 +261,50 @@ def extract_joint_limits(robot: RobotDescription, cfg_limits: dict, logger):
     return q_lim, dq_lim, ddq_lim
 
 
+def extract_torque_limits(robot: RobotDescription,
+                          cfg_limits: dict,
+                          logger,
+                          required: bool = False):
+    """Extract torque limits from URDF effort values or JSON fallback.
+
+    Precedence per joint:
+    1. URDF/XACRO effort limit, if present
+    2. JSON config under joint_limits.torque
+    3. Hard failure when *required* is True
+    """
+    n = robot.nDoF
+    tau_lim = np.zeros((n, 2))
+    sources = []
+    cfg_tau = cfg_limits.get("torque") if cfg_limits is not None else None
+
+    for i, jname in enumerate(robot.revolute_joint_names):
+        jd = next(j for j in robot.joints if j.name == jname)
+        if jd.limit_effort is not None:
+            effort = abs(float(jd.limit_effort))
+            tau_lim[i] = [-effort, effort]
+            sources.append("urdf_effort")
+            continue
+
+        if cfg_tau is not None and i < len(cfg_tau):
+            tau_lim[i] = cfg_tau[i]
+            sources.append("json_torque")
+            continue
+
+        if required:
+            raise ValueError(
+                f"Torque limits missing for joint '{jname}'. "
+                "Provide a URDF/XACRO effort limit or specify the fallback in "
+                "the JSON config under joint_limits.torque."
+            )
+
+        logger.debug("Torque limit unavailable for joint '%s' and not required.", jname)
+        return None, None
+
+    logger.debug("Torque limits:\n%s", tau_lim)
+    logger.debug("Torque limit sources: %s", sources)
+    return tau_lim, sources
+
+
 def _resolve_xacro(urdf_path: str) -> str:
     """If *urdf_path* ends with ``.xacro``, run ``xacro`` to produce URDF XML.
 

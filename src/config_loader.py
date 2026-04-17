@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .config_utils import deep_merge, resolve_path_value
+from .torque_constraints import VALID_ENVELOPE_TYPES, VALID_TORQUE_METHODS
 
 _VALID_METHODS = {"newton_euler", "euler_lagrange"}
 _VALID_BASIS = {"cosine", "sine", "both"}
@@ -100,6 +101,86 @@ def _validate(cfg: dict, path: str):
             f"basis (got {n_periods}). Sine dq(T)=0 is only guaranteed when T "
             f"is an integer multiple of the base period 1/f0."
         )
+
+    torque_method = exc.get("torque_constraint_method", "none")
+    if torque_method not in VALID_TORQUE_METHODS:
+        raise ValueError(
+            f"'excitation.torque_constraint_method' must be one of "
+            f"{sorted(VALID_TORQUE_METHODS)}, got '{torque_method}'"
+        )
+
+    oversample = exc.get("torque_validation_oversample_factor", 1)
+    if oversample < 1:
+        raise ValueError("'excitation.torque_validation_oversample_factor' must be >= 1")
+
+    torque_cfg = exc.get("torque_constraint", {})
+    if torque_method != "none" and exc["constraint_style"] != "literature_standard":
+        raise ValueError(
+            "Torque-constrained excitation is supported only with "
+            "constraint_style='literature_standard' in v1."
+        )
+    if torque_method == "robust_box":
+        if torque_cfg.get("relative_uncertainty") is None:
+            raise ValueError(
+                "robust_box requires excitation.torque_constraint.relative_uncertainty"
+            )
+        if float(torque_cfg.get("absolute_uncertainty_floor", 0.0)) < 0:
+            raise ValueError(
+                "'excitation.torque_constraint.absolute_uncertainty_floor' must be >= 0"
+            )
+    if torque_method == "chance":
+        if torque_cfg.get("relative_stddev") is None:
+            raise ValueError(
+                "chance requires excitation.torque_constraint.relative_stddev"
+            )
+        confidence = float(torque_cfg.get("chance_confidence", 0.0))
+        if not (0.5 < confidence < 1.0):
+            raise ValueError(
+                "'excitation.torque_constraint.chance_confidence' must lie in (0.5, 1.0)"
+            )
+        if float(torque_cfg.get("absolute_stddev_floor", 0.0)) < 0:
+            raise ValueError(
+                "'excitation.torque_constraint.absolute_stddev_floor' must be >= 0"
+            )
+    if torque_method == "actuator_envelope":
+        env_type = torque_cfg.get("envelope_type")
+        if env_type not in VALID_ENVELOPE_TYPES:
+            raise ValueError(
+                f"'excitation.torque_constraint.envelope_type' must be one of "
+                f"{sorted(VALID_ENVELOPE_TYPES)}"
+            )
+        if env_type == "speed_linear":
+            if float(torque_cfg.get("velocity_reference", 0.0)) <= 0.0:
+                raise ValueError(
+                    "'excitation.torque_constraint.velocity_reference' must be > 0 "
+                    "for the speed_linear actuator envelope."
+                )
+            if float(torque_cfg.get("min_scale", 0.0)) <= 0.0:
+                raise ValueError(
+                    "'excitation.torque_constraint.min_scale' must be > 0"
+                )
+            if float(torque_cfg.get("max_scale", 0.0)) <= 0.0:
+                raise ValueError(
+                    "'excitation.torque_constraint.max_scale' must be > 0"
+                )
+    if torque_method == "sequential_redesign":
+        if cfg["method"] != "newton_euler":
+            raise ValueError(
+                "sequential_redesign is only supported with method='newton_euler' in v1."
+            )
+        if cfg.get("identification", {}).get("data_file") is not None:
+            raise ValueError(
+                "sequential_redesign is supported only for synthetic-data runs "
+                "(identification.data_file must be null)."
+            )
+        if int(torque_cfg.get("max_iterations", 0)) < 1:
+            raise ValueError(
+                "'excitation.torque_constraint.max_iterations' must be >= 1"
+            )
+        if float(torque_cfg.get("convergence_tol", 0.0)) < 0.0:
+            raise ValueError(
+                "'excitation.torque_constraint.convergence_tol' must be >= 0"
+            )
 
     if cfg["friction"]["model"] not in _VALID_FRICTION:
         raise ValueError(f"'friction.model' must be one of {_VALID_FRICTION}")

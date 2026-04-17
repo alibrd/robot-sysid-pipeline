@@ -27,13 +27,17 @@ def test_slow_ne_el_regressors_match_across_random_default_states(tmp_path):
     pi = kin.PI.flatten()
     rng = np.random.default_rng(42)
 
-    for _ in range(10):
+    print(f"\nSTAGE 4 & 5 (slow): NE/EL torque agreement across 10 random states (2-DoF RRBot)")
+    for i in range(10):
         q = rng.uniform(-1.0, 1.0, kin.nDoF)
         dq = rng.uniform(-2.0, 2.0, kin.nDoF)
         ddq = rng.uniform(-3.0, 3.0, kin.nDoF)
         tau_ne = newton_euler_regressor(kin, q, dq, ddq) @ pi
         tau_el = reg_el(q, dq, ddq) @ pi[kept]
+        err = np.max(np.abs(tau_ne - tau_el))
+        print(f"  State {i+1:2d}: max|tau_ne - tau_el| = {err:.2e}")
         np.testing.assert_allclose(tau_ne, tau_el, atol=1e-10)
+    print("  VERIFIED: NE and EL torques agree across 10 random states (atol=1e-10)")
 
 
 @pytest.mark.slow
@@ -47,7 +51,8 @@ def test_slow_base_parameter_reduction_preserves_multiple_random_default_observa
     pi = kin.PI.flatten()
     rng = np.random.default_rng(123)
 
-    for _ in range(3):
+    print(f"\nSTAGE 9 (slow): Base-parameter reduction across 3 random observation matrices (2-DoF RRBot)")
+    for trial in range(3):
         rows = []
         for _ in range(60):
             q = rng.uniform(-1.0, 1.0, kin.nDoF)
@@ -56,10 +61,13 @@ def test_slow_base_parameter_reduction_preserves_multiple_random_default_observa
             rows.append(newton_euler_regressor(kin, q, dq, ddq))
         W = np.vstack(rows)
         W_base, P, kept_cols, rank, pi_base = compute_base_parameters(W, pi)
+        obs_err = np.max(np.abs(W @ pi - W_base @ pi_base))
+        print(f"  Trial {trial+1}: W {W.shape} -> W_b {W_base.shape}, rank={rank}, max|W*pi - W_b*pi_b|={obs_err:.2e}")
         np.testing.assert_allclose(W @ pi, W_base @ pi_base, atol=1e-10)
         assert rank == W_base.shape[1]
         assert len(kept_cols) == rank
         assert P.shape[0] == rank
+    print("  VERIFIED: Observation equation preserved across 3 random matrices (atol=1e-10)")
 
 
 @pytest.mark.slow
@@ -96,8 +104,14 @@ def test_slow_literature_standard_condition_cost_matches_manual_base_matrix():
     sv_pos = sv[sv > 1e-12]
     manual = sv_pos[0] / sv_pos[-1]
 
+    print("\nSTAGE 6 (slow): _condition_cost_base() must agree with manual SVD condition number")
+    print(f"  _condition_cost_base() = {cost:.10f}")
+    print(f"  manual SVD ratio       = {manual:.10f}")
+    print(f"  |difference|           = {abs(cost - manual):.2e}")
+
     assert np.isfinite(cost)
     np.testing.assert_allclose(cost, manual, rtol=1e-10, atol=1e-10)
+    print("  VERIFIED: Condition-cost function matches manual SVD computation (rtol=1e-10)")
 
 
 @pytest.mark.slow
@@ -105,4 +119,7 @@ def test_slow_sc_3dof_fixture_remains_supported():
     from src.urdf_parser import parse_urdf
 
     robot = parse_urdf(URDF_3DOF)
+    print(f"\nSTAGE 1 (slow): SC_3DoF fixture support")
+    print(f"  nDoF = {robot.nDoF}")
     assert robot.nDoF == 3
+    print("  VERIFIED: SC_3DoF URDF parses correctly")

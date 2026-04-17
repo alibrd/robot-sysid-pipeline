@@ -127,25 +127,49 @@ def param_count(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool)
 
 
 def param_bounds(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool,
-                 q_lim: np.ndarray):
-    """Default bounds for the trajectory optimisation variables."""
+                 q_lim: np.ndarray, freqs: np.ndarray = None,
+                 dq_lim: np.ndarray = None, ddq_lim: np.ndarray = None):
+    """Bounds for trajectory optimisation variables.
+
+    When ``freqs``, ``dq_lim``, and ``ddq_lim`` are provided the per-harmonic
+    amplitude bound is tightened so that a single harmonic at maximum amplitude
+    cannot alone exceed the velocity or acceleration limits.  This shrinks the
+    search space to a region where feasibility is achievable, which is critical
+    for gradient-based optimisers such as SLSQP.
+    """
     m = num_harmonics
     bounds = []
+
+    def _amp_bound(i, j):
+        amp = (q_lim[i, 1] - q_lim[i, 0]) / 2.0
+        if freqs is not None:
+            omega = 2.0 * np.pi * freqs[j]
+            if dq_lim is not None:
+                dq_max = min(abs(dq_lim[i, 0]), abs(dq_lim[i, 1]))
+                amp = min(amp, dq_max / omega)
+            if ddq_lim is not None:
+                ddq_max = min(abs(ddq_lim[i, 0]), abs(ddq_lim[i, 1]))
+                amp = min(amp, ddq_max / omega ** 2)
+        return amp
+
     if basis == "cosine" or basis == "sine":
         for i in range(nDoF):
-            amp_max = (q_lim[i, 1] - q_lim[i, 0]) / 2.0
-            for _ in range(m):
-                bounds.append((-amp_max, amp_max))
+            for j in range(m):
+                a = _amp_bound(i, j)
+                bounds.append((-a, a))
     elif basis == "both" and not optimize_phase:
         for i in range(nDoF):
-            amp_max = (q_lim[i, 1] - q_lim[i, 0]) / 2.0
-            for _ in range(2 * m):
-                bounds.append((-amp_max, amp_max))
+            for j in range(m):          # cosine amplitudes
+                a = _amp_bound(i, j)
+                bounds.append((-a, a))
+            for j in range(m):          # sine amplitudes
+                a = _amp_bound(i, j)
+                bounds.append((-a, a))
     elif basis == "both" and optimize_phase:
         for i in range(nDoF):
-            amp_max = (q_lim[i, 1] - q_lim[i, 0]) / 2.0
-            for _ in range(m):
-                bounds.append((-amp_max, amp_max))
-            for _ in range(m):
+            for j in range(m):          # amplitudes
+                a = _amp_bound(i, j)
+                bounds.append((-a, a))
+            for _ in range(m):          # phases
                 bounds.append((-np.pi, np.pi))
     return bounds
