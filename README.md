@@ -253,10 +253,10 @@ The documentation-linked verification layer lives in:
 
 ## References
 
-1. Atkeson, An & Hollerbach (1986) — regressor-based identification
-2. Swevers et al. (1997) — optimal excitation trajectories
-3. Gautier & Khalil (1992) — exciting trajectories for base parameters
-4. Khalil & Dombre (2002) — robot modeling and identification
-5. Sousa & Cortesão (2014) — physical feasibility via LMI
-6. Wensing, Kim & Slotine (2018) — pseudo-inertia PSD criterion
-7. Traversaro, Brossette, Escande & Nori (2016) — Cholesky-factored feasibility reparameterization
+1. Atkeson, C. G., An, C. H., & Hollerbach, J. M. (1986). Estimation of inertial parameters of manipulator loads and links. *The International Journal of Robotics Research*, 5(3), 101–119.
+2. Swevers, J., Ganseman, C., Tukel, D. B., De Schutter, J., & Van Brussel, H. (1997). Optimal robot excitation and identification. *IEEE Transactions on Robotics and Automation*, 13(5), 730–740.
+3. Gautier, M., & Khalil, W. (1992). Exciting trajectories for the identification of base inertial parameters of robots. *The International Journal of Robotics Research*, 11(4), 362–375.
+4. Khalil, W., & Dombre, E. (2002). *Modeling, identification and control of robots*. Butterworth-Heinemann.
+5. Sousa, C. D., & Cortesão, R. (2014). Physical feasibility of robot base inertial parameter identification: A linear matrix inequality approach. *The International Journal of Robotics Research*, 33(6), 931–944.
+6. Wensing, P. M., Kim, S., & Slotine, J. J. E. (2018). Linear matrix inequalities for physically consistent inertial parameter identification: A statistical perspective on the mass distribution. *IEEE Robotics and Automation Letters*, 3(1), 60–67.
+7. Traversaro, S., Brossette, S., Escande, A., & Nori, F. (2016). Identification of fully physical consistent inertial parameters using optimization on manifolds. In *2016 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)* (pp. 5446–5451). IEEE.

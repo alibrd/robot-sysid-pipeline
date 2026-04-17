@@ -46,6 +46,16 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 - The default verification suite is in [`tests/test_pipeline_theory.py`](../tests/test_pipeline_theory.py).
 - The optional deeper verification suite is in [`tests/test_pipeline_theory_slow.py`](../tests/test_pipeline_theory_slow.py) and is enabled with `--run-slow`.
 
+Run all theory verification tests:
+
+```bash
+# Fast suite
+pytest tests/test_pipeline_theory.py -v -s
+
+# Full suite including slow tests
+pytest tests/test_pipeline_theory.py tests/test_pipeline_theory_slow.py --run-slow -v -s
+```
+
 ## Stage 1. Parse the URDF/XACRO and Extract a Serial Chain
 
 ### Governing equations
@@ -78,7 +88,39 @@ The parser:
 - accumulates fixed transforms before the first revolute joint into `Tw_0`.
 
 ### Verification evidence
-- Standalone-chain extraction and parameter-vector setup: `test_stage_1_and_3_parser_and_kinematics_build_standalone_model`
+
+**What is verified**: The URDF parser extracts the correct serial chain (number of joints, joint names) and the `RobotKinematics` constructor builds a parameter vector `PI` whose values match the URDF inertial data.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_1_and_3_parser_and_kinematics_build_standalone_model -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 1 & 3: URDF parsing and inertial-parameter vector construction
+  Parsed nDoF          = 2
+  Revolute joint names = ['single_rrbot_joint1', 'single_rrbot_joint2']
+  PI link-1 expected   = [1.     0.     0.     0.45   1.2025 0.     0.     1.2025 0.     1.    ]
+  max|PI_actual - PI_expected| = 0.00e+00
+  VERIFIED: URDF parsed correctly, PI vector matches expected values (atol=1e-12)
+```
+
+**What is verified**: The SC_1DoF and SC_3DoF alternative fixtures parse correctly.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_1_sc_reference_models_remain_supported -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 1: Additional URDF fixtures remain supported
+  SC_1DoF nDoF = 1
+  SC_3DoF nDoF = 3
+  VERIFIED: SC_1DoF and SC_3DoF fixtures parse correctly
+```
+
 - Existing chain-order and `Tw_0` checks: [`tests/test_pipeline.py`](../tests/test_pipeline.py)
 
 ## Stage 2. Resolve Joint Limits and Fail Early if They Are Missing
@@ -99,7 +141,20 @@ The function applies this precedence:
 Acceleration limits are always expected from JSON for the supplied standalone fixtures because URDFs typically do not store them.
 
 ### Verification evidence
-- Missing-limit rejection: `test_stage_2_joint_limit_extraction_rejects_missing_json_overrides`
+
+**What is verified**: The pipeline raises a `ValueError` when required joint limits are missing from both the URDF and the JSON override.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_2_joint_limit_extraction_rejects_missing_json_overrides -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 2: Missing joint limits must be rejected early
+  ValueError raised with 'Position limits missing'
+  VERIFIED: Pipeline fails early when required joint limits are absent
+```
 
 ## Stage 3. Build Kinematics and the Rigid-Body Parameter Vector
 
@@ -142,7 +197,22 @@ where $S(c_i)$ is the skew-symmetric matrix of the center-of-mass offset. This i
 The gravity constant is hardcoded as $g = 9.80665\ \text{m/s}^2$ in [`src/math_utils.py`](../src/math_utils.py), matching the standard SI gravity constant.
 
 ### Verification evidence
-- Standalone kinematics and parameter-vector values: `test_stage_1_and_3_parser_and_kinematics_build_standalone_model`
+
+**What is verified**: The per-link parameter vector `PI` matches the URDF inertial data (including parallel-axis shift) and the gravity constant is the standard SI value.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_1_and_3_parser_and_kinematics_build_standalone_model -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 1 & 3: URDF parsing and inertial-parameter vector construction
+  PI link-1 actual     = [1.     0.     0.     0.45   1.2025 0.     0.     1.2025 0.     1.    ]
+  max|PI_actual - PI_expected| = 0.00e+00
+  VERIFIED: URDF parsed correctly, PI vector matches expected values (atol=1e-12)
+```
+
 - Existing gravity/kinematics coverage: [`tests/test_pipeline.py`](../tests/test_pipeline.py)
 
 ## Stage 4. Build the Newton-Euler Regressor
@@ -187,8 +257,37 @@ Key implementation points:
 - `newton_euler_regressor()` assembles the final joint-space regressor row by row.
 
 ### Verification evidence
-- Shared-torque agreement with Euler-Lagrange on a standalone 1-DoF robot: `test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques`
-- Broader 3-DoF random-state agreement: `test_slow_ne_el_regressors_match_across_random_3dof_states`
+
+**What is verified**: The Newton-Euler and Euler-Lagrange regressors produce identical torques $\tau = Y \pi$ on the default 2-DoF RRBot for random joint states.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 4 & 5: NE and EL regressors must produce identical torques (2-DoF RRBot)
+  State 1: tau_ne=[...], tau_el=[...], max|diff|=X.XXe-XX
+  State 2: ...
+  State 3: ...
+  VERIFIED: NE and EL torques agree across 3 random states (atol=1e-10)
+```
+
+**What is verified** (slow): Same agreement across 10 random states on the default 2-DoF RRBot.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory_slow.py::test_slow_ne_el_regressors_match_across_random_default_states --run-slow -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 4 & 5 (slow): NE/EL torque agreement across 10 random states (2-DoF RRBot)
+  State  1: max|tau_ne - tau_el| = X.XXe-XX
+  ...
+  VERIFIED: NE and EL torques agree across 10 random states (atol=1e-10)
+```
 
 ## Stage 5. Build the Euler-Lagrange Regressor
 
@@ -236,8 +335,37 @@ The implementation:
 - caches the symbolic regressor to disk and re-lambdifies it on load.
 
 ### Verification evidence
-- Shared-torque agreement with Newton-Euler: `test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques`
-- Broader 3-DoF random-state agreement: `test_slow_ne_el_regressors_match_across_random_3dof_states`
+
+**What is verified**: The Euler-Lagrange and Newton-Euler regressors produce identical torques $\tau = Y \pi$ on the default 2-DoF RRBot for random joint states, confirming the two independently-derived regressors are equivalent.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 4 & 5: NE and EL regressors must produce identical torques (2-DoF RRBot)
+  State 1: tau_ne=[...], tau_el=[...], max|diff|=X.XXe-XX
+  State 2: ...
+  State 3: ...
+  VERIFIED: NE and EL torques agree across 3 random states (atol=1e-10)
+```
+
+**What is verified** (slow): Same agreement across 10 random states on the default 2-DoF RRBot.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory_slow.py::test_slow_ne_el_regressors_match_across_random_default_states --run-slow -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 4 & 5 (slow): NE/EL torque agreement across 10 random states (2-DoF RRBot)
+  State  1: max|tau_ne - tau_el| = X.XXe-XX
+  ...
+  VERIFIED: NE and EL torques agree across 10 random states (atol=1e-10)
+```
 
 ### Current implementation note
 The EL branch returns a reduced symbolic regressor after removing structurally zero columns (i.e. columns that are literal zero in their symbolic form, without invoking symbolic reasoning such as `equals` or `simplify`). Columns that are algebraically zero but not yet simplified are left in place and handled later by the numeric base-parameter reduction in Stage 9. This is mathematically fine for unconstrained identification, but it means the current EL path cannot support the per-link full-parameter feasibility constraints used by the pseudo-inertia method in Stage 11.
@@ -363,10 +491,68 @@ which is an engineering heuristic for large excitation subject to limits, not a 
 - Excitation optimization: [`src/excitation.py`](../src/excitation.py)
 
 ### Verification evidence
-- Sine boundary-condition proof by direct evaluation: `test_stage_6_sine_basis_enforces_boundary_conditions_on_integer_periods`
-- Config guard for noninteger sine periods: `test_stage_6_noninteger_sine_periods_are_rejected_by_config`
-- Solver-path separation between the three styles: `test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths`
-- Slower literature-standard run with base-condition objective: `test_slow_literature_standard_excitation_returns_finite_conditioning_result`
+
+**What is verified**: The sine basis satisfies $q(0) = q_0$, $\dot q(0) = 0$, $\dot q(T) = 0$, and $\ddot q(T) = 0$ when the trajectory duration is an integer number of base periods.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_6_sine_basis_enforces_boundary_conditions_on_integer_periods -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 6: Sine basis boundary conditions on integer periods
+  q(0)    = [ 0.1 -0.2],   expected q0 = [ 0.1 -0.2]
+  dq(T)   = [...], expected = 0
+  |dq(T)|    = X.XXe-XX
+  |ddq(T)|   = X.XXe-XX
+  VERIFIED: q(0)=q0, dq(0)=0, dq(T)=0, ddq(T)=0 on integer periods
+```
+
+**What is verified**: Config validation rejects `sine` basis with non-integer `trajectory_duration_periods`.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_6_noninteger_sine_periods_are_rejected_by_config -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 6: Noninteger sine periods must be rejected by config validation
+  ValueError raised matching 'integer'
+  VERIFIED: Config rejects sine basis with trajectory_duration_periods=1.5
+```
+
+**What is verified**: The three excitation styles (`legacy_excTrajGen`, `urdf_reference`, `literature_standard`) dispatch to their correct solver paths (differential evolution vs `scipy.optimize.minimize`).
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 6: Excitation styles dispatch to distinct solver paths
+  Differential evolution calls = 2 (expected 2: legacy + urdf_reference)
+  scipy.minimize calls         = 1 (expected 1: literature_standard)
+  VERIFIED: Each excitation style dispatches to its correct solver path
+```
+
+**What is verified** (slow): The `_condition_cost_base()` function agrees with a manual SVD-based condition-number calculation on the base-parameter observation matrix.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory_slow.py::test_slow_literature_standard_condition_cost_matches_manual_base_matrix --run-slow -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 6 (slow): _condition_cost_base() must agree with manual SVD condition number
+  _condition_cost_base() = ...
+  manual SVD ratio       = ...
+  |difference|           = X.XXe-XX
+  VERIFIED: Condition-cost function matches manual SVD computation (rtol=1e-10)
+```
 
 ### Current implementation note
 - `legacy_excTrajGen` is intentionally kept as a compatibility mode and is **not** a literature-optimal excitation objective.
@@ -410,7 +596,39 @@ matching the smooth Coulomb-friction augmentation commonly used in inverse-dynam
 If `identification.data_file` is absent, the pipeline synthesizes `q`, `dq`, `ddq` from the optimized excitation trajectory and computes torques from the chosen regressor. If `data_file` is present, the pipeline expects `q`, `dq`, `ddq`, `tau`, and optionally `fs` to already exist in the `.npz`.
 
 ### Verification evidence
-- Friction-regressor block checks: `test_stage_6_friction_regressor_augmentation_matches_supported_models`
+
+**What is verified**: The friction regressor blocks for all four models (`none`, `viscous`, `coulomb`, `viscous_coulomb`) match their analytical definitions.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_6_friction_regressor_augmentation_matches_supported_models -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 7 (friction): Friction regressor blocks match analytical definitions
+  'none'    : shape=(3, 0)
+  'viscous' : shape=(3, 3), max|err|=0.00e+00
+  'coulomb' : shape=(3, 6), max|err|=0.00e+00
+  'viscous_coulomb': shape=(3, 9), max|err|=0.00e+00
+  VERIFIED: All friction models match analytical definitions (atol=1e-12)
+```
+
+**What is verified**: The pipeline's synthetic-data path is exercised end-to-end: the test runs the full pipeline, loads the saved excitation trajectory, independently reconstructs $q, \dot q, \ddot q$ and $\tau = Y \pi$, and verifies (1) $\tau_{\text{vec}} = W \pi$ on the reconstructed data and (2) the pipeline's identified base parameters match the true projection $P \pi$.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_7_synthetic_tau_equals_regressor_times_pi -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 7: Synthetic data must satisfy tau_k = Y_k @ pi
+  nDoF = 2, n_samples = ..., PI length = 20
+  max|tau_vec - W @ pi|           = 0.00e+00
+  max|pi_base_pipeline - pi_true| = X.XXe-XX
+  VERIFIED: Pipeline synthetic-data path produces tau = Y @ pi and recovers true base params
+```
 
 ### Current implementation note
 The pipeline does **not** currently estimate $\dot q$ or $\ddot q$ from position measurements. If external data is used, those signals must already be available.
@@ -460,8 +678,38 @@ The implementation:
 - warns when overdetermination is low.
 
 ### Verification evidence
-- Manual stack equivalence: `test_stage_8_observation_matrix_matches_manual_stacking_equation`
-- Filtering-before-downsampling proof: `test_stage_8_filtering_happens_before_downsampling`
+
+**What is verified**: The stacked observation matrix $W$ built by `build_observation_matrix()` equals the manual `np.vstack` of per-sample regressors, and $\tau_{\text{vec}}$ matches the flattened input.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_8_observation_matrix_matches_manual_stacking_equation -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 8: Observation matrix W must equal manual row-by-row stacking
+  W shape       = (24, 20)
+  max|W - W_manual|       = 0.00e+00
+  max|tau_vec - tau_flat|  = 0.00e+00
+  VERIFIED: W matches manual stacking and tau_vec matches flat tau (atol=1e-12)
+```
+
+**What is verified**: Filtering is applied before downsampling (not the reverse), so that high-frequency content is removed before decimation.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_8_filtering_happens_before_downsampling -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 8: Filtering must happen before downsampling
+  max|W - filtered_then_ds| = 0.00e+00 (should be ~0)
+  max|W - raw_ds|           = X.XXe-01 (should be >> 0)
+  VERIFIED: Pipeline filters before downsampling (not the reverse)
+```
+
 - Existing sample-sufficiency rejection: [`tests/test_pipeline.py`](../tests/test_pipeline.py)
 
 ## Stage 9. Reduce the Full Model to Base Parameters
@@ -507,8 +755,38 @@ This is precisely the base-parameter identification idea advocated by Gautier (1
 The same reduction routine is used for Newton-Euler and Euler-Lagrange observation matrices.
 
 ### Verification evidence
-- NE and EL observation-equation preservation: `test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_and_el`
-- Stronger random 3-DoF preservation: `test_slow_base_parameter_reduction_preserves_multiple_random_3dof_observation_matrices`
+
+**What is verified**: The base-parameter reduction preserves the observation equation $W \pi = W_b \pi_b$ for both Newton-Euler and Euler-Lagrange observation matrices on the default 2-DoF RRBot.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_and_el -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 9: Base-parameter reduction preserves observation equation (newton_euler)
+  Full W shape  = (16, 20) (20 params)
+  Base W shape  = (16, 6) (rank=6)
+  max|W*pi - W_b*pi_b| = X.XXe-XX
+  VERIFIED: W*pi == W_b*pi_b for newton_euler (atol=1e-10, rank=6)
+```
+
+**What is verified** (slow): Same preservation across 3 random 60-sample observation matrices on the default 2-DoF RRBot.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory_slow.py::test_slow_base_parameter_reduction_preserves_multiple_random_default_observation_matrices --run-slow -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 9 (slow): Base-parameter reduction across 3 random observation matrices (2-DoF RRBot)
+  Trial 1: W (120, 20) -> W_b (120, 6), rank=6, max|W*pi - W_b*pi_b|=X.XXe-XX
+  Trial 2: ...
+  Trial 3: ...
+  VERIFIED: Observation equation preserved across 3 random matrices (atol=1e-10)
+```
 
 ## Stage 10. Solve the Identification Problem
 
@@ -554,7 +832,35 @@ Current solver behavior:
 - `parameter_bounds=true`: auto-generates $\pm 50\%$ style bounds around the current base-parameter magnitudes and switches `ols` to `bounded_ls`
 
 ### Verification evidence
-- Automatic bounded-LS switching: `test_stage_10_parameter_bounds_enable_bounded_ls`
+
+**What is verified**: When `parameter_bounds=true`, the pipeline automatically switches from OLS to `bounded_ls`.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_10_parameter_bounds_enable_bounded_ls -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 10: parameter_bounds=true must switch solver to bounded_ls
+  Solver in results_summary.json = 'bounded_ls'
+  VERIFIED: Pipeline auto-switched from OLS to bounded_ls when parameter_bounds=true
+```
+
+**What is verified**: OLS recovers exact base parameters from noiseless synthetic data when $W$ has full column rank.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_10_ols_recovers_exact_base_parameters_from_noiseless_data -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 10: OLS must recover exact base parameters from noiseless data
+  W_base shape    = (50, 7)
+  max|pi_hat - pi_true| = X.XXe-15
+  VERIFIED: OLS recovers exact base parameters (atol=1e-10)
+```
 
 ### Current implementation note
 When `feasibility_method="lmi"` is requested, the pipeline does **not** stay in the reduced base-parameter space. It lifts the problem back to a full-space constrained least-squares problem to apply per-link pseudo-inertia constraints. That is a deliberate implementation choice in the current code.
@@ -613,12 +919,82 @@ The code offers:
 - PSD projection by eigenvalue clipping when post-hoc correction is requested.
 
 ### Verification evidence
-- Standard rigid-body failure diagnostics: `test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures`
-- EL rejection for constrained feasibility: `test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes`
-- Constrained NE run that returns a feasible pseudo-inertia model: `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model`
-- Pseudo-inertia roundtrip extraction: `test_pi_from_pseudo_inertia_roundtrip`
-- Cholesky solver guarantees PSD output: `test_cholesky_solver_guarantees_psd`
-- End-to-end Cholesky-constrained pipeline: `test_cholesky_constrained_produces_feasible_model`
+
+**What is verified**: The post-hoc feasibility check detects all standard rigid-body failure conditions (negative mass, non-PSD inertia, triangle inequality violation, non-PSD pseudo-inertia).
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 11: Pseudo-inertia checks must detect physically invalid bodies
+  pi_bad      = [-1.  0.  0.  0. -0.1 0.  0.  0.1 0.  0.1]
+  feasible    = False
+  Issues: Non-positive mass | Inertia not PSD | Triangle ineq. | Pseudo-inertia NOT PSD
+  VERIFIED: All standard rigid-body failure conditions detected
+```
+
+**What is verified**: The Euler-Lagrange method rejects constrained feasibility modes (`lmi`, `cholesky`) at config load.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 11: EL method must reject constrained feasibility modes (lmi/cholesky)
+  ValueError raised matching 'euler_lagrange'
+  VERIFIED: euler_lagrange + feasibility_method='lmi' is rejected at config load
+```
+
+**What is verified**: The pseudo-inertia roundtrip $\pi \to J \to \pi$ recovers the original parameter vector.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_11_pseudo_inertia_roundtrip -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 11: Pseudo-inertia roundtrip pi -> J -> pi
+  max|pi_back - pi| = X.XXe-17
+  VERIFIED: pi -> J -> pi roundtrip recovers original parameters (atol=1e-14)
+```
+
+**What is verified**: The Cholesky solver path produces parameters with $J \succeq 0$ by construction.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_11_cholesky_solver_guarantees_psd -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 11: Cholesky solver must produce pseudo-inertia PSD output
+  Pseudo-inertia eigenvalues = [...]
+  is_pseudo_inertia_psd      = True
+  VERIFIED: Cholesky solver guarantees J >= 0 by construction
+```
+
+**What is verified**: LMI-constrained NE identification returns a feasible pseudo-inertia model.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_12_constrained_lmi_returns_feasible_newton_euler_model -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 12: LMI-constrained NE identification must return a feasible model
+  feasible            = True
+  solved_in_full_space= True
+  Link 1 pseudo-inertia eigenvalues = [...]
+  Link 2 pseudo-inertia eigenvalues = [...]
+  VERIFIED: LMI-constrained model is feasible with J_i >= 0 for all links
+```
 
 ### Current implementation note
 - `feasibility_method="lmi"` uses SLSQP with explicit eigenvalue inequality constraints on $J_i$.
@@ -649,9 +1025,56 @@ An unconstrained run can:
 This distinction is scientifically important. The log file tells you whether the pipeline executed; the feasibility report tells you whether the identified rigid-body parameters correspond to a physically valid mass distribution.
 
 ### Verification evidence
-- Unconstrained successful run with infeasible result: `test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run`
-- Constrained LMI feasible run: `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model`
-- Constrained Cholesky feasible run: `test_cholesky_constrained_produces_feasible_model`
+
+**What is verified**: An unconstrained pipeline run can complete successfully while reporting `feasible=False`, demonstrating that pipeline success and physical feasibility are distinct concepts.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 12: Pipeline success and physical feasibility are distinct
+  feasible flag         = False
+  pipeline completed    = True
+  VERIFIED: Pipeline completed successfully but feasible=False (unconstrained run)
+```
+
+**What is verified**: LMI-constrained NE identification returns a feasible model.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_12_constrained_lmi_returns_feasible_newton_euler_model -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 12: LMI-constrained NE identification must return a feasible model
+  feasible            = True
+  solved_in_full_space= True
+  Link 1 pseudo-inertia eigenvalues = [...]
+  Link 2 pseudo-inertia eigenvalues = [...]
+  VERIFIED: LMI-constrained model is feasible with J_i >= 0 for all links
+```
+
+**What is verified**: Cholesky-constrained NE identification returns a feasible model. The test asserts the pipeline's `feasible` flag and validates pseudo-inertia PSD for every rigid-body link block.
+
+**Run**:
+```bash
+pytest tests/test_pipeline_theory.py::test_stage_12_cholesky_constrained_produces_feasible_model -v -s
+```
+
+**Expected output** (excerpt):
+```
+STAGE 12: Cholesky-constrained pipeline must produce a feasible model
+  residual = ...
+  feasible = True
+  nDoF = 2, pi_corrected length = 20
+  Link 1 pseudo-inertia eigenvalues = [...], PSD = True
+  Link 2 pseudo-inertia eigenvalues = [...], PSD = True
+  VERIFIED: Cholesky-constrained pipeline produces feasible pseudo-inertia for all links
+```
 
 ## Traceability Appendix
 
@@ -660,20 +1083,25 @@ This distinction is scientifically important. The log file tells you whether the
 | 1 | Standalone URDF parsing and serial-chain extraction work | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_1_and_3_parser_and_kinematics_build_standalone_model` |
 | 2 | Missing limits are rejected clearly | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_2_joint_limit_extraction_rejects_missing_json_overrides` |
 | 3 | The inertial parameter vector matches the URDF data and parallel-axis shift | [`src/kinematics.py`](../src/kinematics.py) | `test_stage_1_and_3_parser_and_kinematics_build_standalone_model` |
-| 4-5 | NE and EL produce the same torques on the same robot/state | [`src/dynamics_newton_euler.py`](../src/dynamics_newton_euler.py), [`src/dynamics_euler_lagrange.py`](../src/dynamics_euler_lagrange.py) | `test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques`, `test_slow_ne_el_regressors_match_across_random_3dof_states` |
+| 4-5 | NE and EL produce the same torques on the default 2-DoF RRBot | [`src/dynamics_newton_euler.py`](../src/dynamics_newton_euler.py), [`src/dynamics_euler_lagrange.py`](../src/dynamics_euler_lagrange.py) | `test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques`, `test_slow_ne_el_regressors_match_across_random_default_states` |
 | 6 | Sine endpoint conditions hold on integer periods | [`src/trajectory.py`](../src/trajectory.py) | `test_stage_6_sine_basis_enforces_boundary_conditions_on_integer_periods` |
 | 6 | Unsupported noninteger sine periods are rejected | [`src/config_loader.py`](../src/config_loader.py) | `test_stage_6_noninteger_sine_periods_are_rejected_by_config` |
 | 6 | Friction augmentation matches the documented matrices | [`src/friction.py`](../src/friction.py) | `test_stage_6_friction_regressor_augmentation_matches_supported_models` |
 | 6 | Excitation styles map to distinct solver paths | [`src/excitation.py`](../src/excitation.py) | `test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths` |
+| 6 | Condition-cost function matches manual SVD computation | [`src/excitation.py`](../src/excitation.py) | `test_slow_literature_standard_condition_cost_matches_manual_base_matrix` |
+| 7 | Synthetic data satisfies $\tau_k = Y_k \pi$ | [`src/pipeline.py`](../src/pipeline.py) | `test_stage_7_synthetic_tau_equals_regressor_times_pi` |
 | 8 | $W$ is stacked exactly as the theory states | [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_observation_matrix_matches_manual_stacking_equation` |
 | 8 | Filtering happens before downsampling | [`src/filtering.py`](../src/filtering.py), [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_filtering_happens_before_downsampling` |
-| 9 | Base reduction preserves the observation equation | [`src/base_parameters.py`](../src/base_parameters.py) | `test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_and_el`, `test_slow_base_parameter_reduction_preserves_multiple_random_3dof_observation_matrices` |
+| 9 | Base reduction preserves the observation equation | [`src/base_parameters.py`](../src/base_parameters.py) | `test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_and_el`, `test_slow_base_parameter_reduction_preserves_multiple_random_default_observation_matrices` |
 | 10 | Parameter bounds switch the pipeline into bounded LS | [`src/pipeline.py`](../src/pipeline.py), [`src/solver.py`](../src/solver.py) | `test_stage_10_parameter_bounds_enable_bounded_ls` |
+| 10 | OLS recovers exact base parameters from noiseless data | [`src/solver.py`](../src/solver.py) | `test_stage_10_ols_recovers_exact_base_parameters_from_noiseless_data` |
 | 11 | Pseudo-inertia detects physically invalid bodies | [`src/feasibility.py`](../src/feasibility.py) | `test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures` |
 | 11 | EL constrained feasibility modes are rejected honestly | [`src/config_loader.py`](../src/config_loader.py) | `test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes` |
+| 11 | Pseudo-inertia roundtrip $\pi \to J \to \pi$ | [`src/feasibility.py`](../src/feasibility.py) | `test_stage_11_pseudo_inertia_roundtrip` |
+| 11 | Cholesky solver guarantees $J \succeq 0$ | [`src/solver.py`](../src/solver.py) | `test_stage_11_cholesky_solver_guarantees_psd` |
 | 12 | Successful execution is distinct from physical feasibility | [`src/pipeline.py`](../src/pipeline.py) | `test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run` |
 | 12 | Constrained NE identification can return a feasible model (LMI) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model` |
-| 12 | Constrained NE identification can return a feasible model (Cholesky) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_cholesky_constrained_produces_feasible_model` |
+| 12 | Constrained NE identification can return a feasible model (Cholesky) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_stage_12_cholesky_constrained_produces_feasible_model` |
 
 ## References
 
