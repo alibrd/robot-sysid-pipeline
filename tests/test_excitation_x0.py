@@ -94,10 +94,8 @@ def test_long_horizon_sine_basis_is_rejected_before_slsqp():
         "optimize_phase": True,
         "num_harmonics": 20,
         "base_frequency_hz": 0.2,
-        "constraint_style": "literature_standard",
         "trajectory_duration_periods": 120,
         "optimizer_max_iter": 5,
-        "optimizer_pop_size": 4,
         "optimize_condition_number": False,
         "torque_constraint_method": "none",
     }
@@ -112,49 +110,82 @@ def test_long_horizon_sine_basis_is_rejected_before_slsqp():
         )
 
 
-def test_pipeline_preflight_rejects_long_horizon_sine_before_optimization(monkeypatch):
-    from src.config_loader import load_config
-    from src.pipeline import SystemIdentificationPipeline
-
-    cfg = load_config(str(ROOT / "config" / "rrbot_single_2min_20harm_pipeline.json"))
-    cfg["excitation"]["basis_functions"] = "sine"
-    cfg["excitation"]["optimize_phase"] = True
-    cfg["excitation"]["trajectory_duration_periods"] = 120
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("optimise_excitation should not run after preflight failure")
-
-    monkeypatch.setattr("src.pipeline.optimise_excitation", fail_if_called)
-
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    cfg["output_dir"] = str(TMP_ROOT / "pytest_preflight_reject" / "out")
-    pipe = SystemIdentificationPipeline(deepcopy(cfg))
-    with pytest.raises(ValueError, match="fundamentally infeasible"):
-        pipe.run()
-
-
-def test_rrbot_single_2min_20harm_sample_config_matches_supported_setup():
-    from src.config_loader import load_config
+def test_preflight_rejects_sine_with_optimize_phase_on_long_horizon():
     from src.excitation import preflight_excitation_config
 
-    cfg = load_config(str(ROOT / "config" / "rrbot_single_2min_20harm_pipeline.json"))
-    q_lim = np.asarray(cfg["joint_limits"]["position"], dtype=float)
-    dq_lim = np.asarray(cfg["joint_limits"]["velocity"], dtype=float)
-    ddq_lim = np.asarray(cfg["joint_limits"]["acceleration"], dtype=float)
+    cfg_exc = {
+        "basis_functions": "sine",
+        "optimize_phase": True,
+        "num_harmonics": 5,
+        "base_frequency_hz": 0.2,
+        "trajectory_duration_periods": 120,
+        "torque_constraint_method": "none",
+    }
+    q_lim = np.array([[-1.57, 1.57], [-1.57, 1.57]])
+    dq_lim = np.array([[-5.0, 5.0], [-5.0, 5.0]])
+    ddq_lim = np.array([[-1.5, 1.5], [-0.5, 0.5]])
 
-    assessment = preflight_excitation_config(cfg["excitation"], q_lim, dq_lim, ddq_lim)
+    with pytest.raises(ValueError, match="fundamentally infeasible"):
+        preflight_excitation_config(cfg_exc, q_lim, dq_lim, ddq_lim)
 
-    assert cfg["excitation"]["basis_functions"] == "both"
-    assert cfg["excitation"]["optimize_phase"] is False
-    assert cfg["excitation"]["trajectory_duration_periods"] == 24
+
+def test_preflight_both_basis_24_periods_reports_120s_duration():
+    from src.excitation import preflight_excitation_config
+
+    cfg_exc = {
+        "basis_functions": "both",
+        "optimize_phase": False,
+        "num_harmonics": 20,
+        "base_frequency_hz": 0.2,
+        "trajectory_duration_periods": 24,
+        "torque_constraint_method": "none",
+    }
+    q_lim = np.array([[-1.57, 1.57], [-1.57, 1.57]])
+    dq_lim = np.array([[-5.0, 5.0], [-5.0, 5.0]])
+    ddq_lim = np.array([[-1.5, 1.5], [-0.5, 0.5]])
+
+    assessment = preflight_excitation_config(cfg_exc, q_lim, dq_lim, ddq_lim)
+
     assert assessment["tf"] == pytest.approx(120.0)
 
 
-def test_pipeline_reaches_stage_5_for_rrbot_single_2min_20harm_sample(monkeypatch):
+def test_pipeline_passes_excitation_config_to_stage_5(tmp_path, monkeypatch):
+    import json
+
     from src.config_loader import load_config
     from src.pipeline import SystemIdentificationPipeline
 
-    cfg = load_config(str(ROOT / "config" / "rrbot_single_2min_20harm_pipeline.json"))
+    cfg = {
+        "urdf_path": str(ROOT / "tests" / "assets" / "RRBot_single.urdf"),
+        "output_dir": str(tmp_path / "out"),
+        "method": "newton_euler",
+        "joint_limits": {
+            "position": [[-1.57, 1.57], [-1.57, 1.57]],
+            "velocity": [[-5.0, 5.0], [-5.0, 5.0]],
+            "acceleration": [[-1.5, 1.5], [-0.5, 0.5]],
+        },
+        "excitation": {
+            "basis_functions": "both",
+            "optimize_phase": False,
+            "num_harmonics": 20,
+            "base_frequency_hz": 0.2,
+            "trajectory_duration_periods": 24,
+            "torque_constraint_method": "none",
+        },
+        "friction": {"model": "none"},
+        "identification": {
+            "solver": "ols",
+            "parameter_bounds": False,
+            "feasibility_method": "none",
+            "data_file": None,
+        },
+        "filtering": {"enabled": False},
+        "downsampling": {"frequency_hz": 0},
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    loaded_cfg = load_config(str(cfg_path))
+
     captured = {}
 
     def stop_after_stage_5(kin, cfg_exc, q_lim, dq_lim, ddq_lim, **kwargs):
@@ -163,9 +194,7 @@ def test_pipeline_reaches_stage_5_for_rrbot_single_2min_20harm_sample(monkeypatc
 
     monkeypatch.setattr("src.pipeline.optimise_excitation", stop_after_stage_5)
 
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    cfg["output_dir"] = str(TMP_ROOT / "pytest_stage5_sample" / "out")
-    pipe = SystemIdentificationPipeline(deepcopy(cfg))
+    pipe = SystemIdentificationPipeline(deepcopy(loaded_cfg))
     with pytest.raises(RuntimeError, match="STOP_AFTER_STAGE_5"):
         pipe.run()
 

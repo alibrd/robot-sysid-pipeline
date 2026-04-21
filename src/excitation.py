@@ -1,4 +1,4 @@
-"""Excitation trajectory optimisation with multiple torque-limit formulations."""
+"""Excitation trajectory optimisation with torque-limit-aware extensions."""
 # Long-horizon sine-only excitation is fundamentally drift-limited: the
 # lambda_1 correction required to enforce dq(0)=0 bounds all sine amplitudes by
 # O(q_range / tf), so the feasible set collapses toward near-zero motion as tf
@@ -7,7 +7,7 @@ import logging
 from copy import deepcopy
 
 import numpy as np
-from scipy.optimize import LinearConstraint, differential_evolution, minimize
+from scipy.optimize import LinearConstraint, minimize
 
 from .base_parameters import compute_base_parameters
 from .dynamics_newton_euler import newton_euler_regressor
@@ -194,9 +194,7 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
     opt_phase = cfg_exc.get("optimize_phase", False)
     m = cfg_exc["num_harmonics"]
     f0 = cfg_exc["base_frequency_hz"]
-    style = cfg_exc["constraint_style"]
     max_iter = cfg_exc.get("optimizer_max_iter", 300)
-    pop_size = cfg_exc.get("optimizer_pop_size", 15)
     n_periods = cfg_exc.get("trajectory_duration_periods", 1)
     opt_cond = cfg_exc.get("optimize_condition_number", True)
     torque_method = cfg_exc.get("torque_constraint_method", "none")
@@ -211,16 +209,18 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
     q0 = np.mean(q_lim, axis=1)
 
     n_params = param_count(nDoF, m, basis, opt_phase)
-    bounds = param_bounds(nDoF, m, basis, opt_phase, q_lim,
-                          freqs=freqs, dq_lim=dq_lim, ddq_lim=ddq_lim)
+    bounds = param_bounds(
+        nDoF, m, basis, opt_phase, q_lim,
+        freqs=freqs, dq_lim=dq_lim, ddq_lim=ddq_lim,
+    )
     _validate_sine_basis_feasibility(
         bounds, basis, nDoF, m, freqs, q_lim, dq_lim, tf, logger,
     )
 
     logger.info(
-        "Excitation optimisation: style=%s, basis=%s, harmonics=%d, optimize_cond=%s, "
+        "Excitation optimisation: basis=%s, harmonics=%d, optimize_cond=%s, "
         "n_params=%d, torque_method=%s",
-        style, basis, m, opt_cond, n_params, torque_method,
+        basis, m, opt_cond, n_params, torque_method,
     )
 
     if regressor_fn is not None:
@@ -231,183 +231,128 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
 
     get_regressor = make_augmented_regressor(base_regressor_fn, friction_model)
 
-    if style == "legacy_excTrajGen":
-        def cost(x):
-            q, dq, _ = fourier_trajectory(x, freqs, t, q0, basis, opt_phase)
-            j = np.sum(1.0 / (1e-3 + np.abs(q))) + 100.0 * np.sum(1.0 / (1e-3 + np.abs(dq)))
-            return j + _penalty_soft_exp(q, dq, q_lim, dq_lim)
+    # Structural identifiability depends only on the robot model, not on the
+    # specific trajectory. Reusing kept_cols avoids an expensive QR decomposition
+    # on every cost/gradient evaluation when optimizing the base-matrix condition
+    # number.
+    base_kept_cols = None
+    if opt_cond:
+        try:
+            q_ref = np.tile(q0[:, None], (1, 50)) + 0.1 * np.random.default_rng(0).standard_normal((nDoF, 50))
+            dq_ref = 0.5 * np.random.default_rng(1).standard_normal((nDoF, 50))
+            ddq_ref = 0.5 * np.random.default_rng(2).standard_normal((nDoF, 50))
+            W_ref = np.vstack([
+                get_regressor(q_ref[:, k], dq_ref[:, k], ddq_ref[:, k])
+                for k in range(50)
+            ])
+            _, _, base_kept_cols, _, _ = compute_base_parameters(
+                W_ref, np.ones(W_ref.shape[1])
+            )
+        except Exception:
+            base_kept_cols = None
 
-        result = _run_differential_evolution(cost, bounds, max_iter, pop_size)
-
-    elif style == "urdf_reference":
-        def cost(x):
-            q, dq, ddq_v = fourier_trajectory(x, freqs, t, q0, basis, opt_phase)
-            if opt_cond:
-                c = _condition_cost(q, dq, ddq_v, t, kin, get_regressor)
-            else:
-                c = _amplitude_cost(dq, ddq_v)
-            return c + _penalty_sigmoid(q, dq, ddq_v, q_lim, dq_lim, ddq_lim)
-
-        result = _run_differential_evolution(cost, bounds, max_iter, pop_size)
-
-    elif style == "literature_standard":
-        # Precompute the base parameter column indices once.  The structural
-        # identifiability (which columns are linearly independent) depends only on
-        # the robot model, not on the specific trajectory.  Reusing kept_cols
-        # avoids an expensive QR decomposition on every cost/gradient evaluation.
-        _base_kept_cols = None
+    def cost_lit(x):
+        q, dq, ddq_v = fourier_trajectory(x, freqs, t, q0, basis, opt_phase)
         if opt_cond:
-            try:
-                _q_ref = np.tile(q0[:, None], (1, 50)) + 0.1 * np.random.default_rng(0).standard_normal((nDoF, 50))
-                _dq_ref = 0.5 * np.random.default_rng(1).standard_normal((nDoF, 50))
-                _ddq_ref = 0.5 * np.random.default_rng(2).standard_normal((nDoF, 50))
-                _W_ref = np.vstack([
-                    get_regressor(_q_ref[:, k], _dq_ref[:, k], _ddq_ref[:, k])
-                    for k in range(50)
-                ])
-                _, _, _base_kept_cols, _, _ = compute_base_parameters(
-                    _W_ref, np.ones(_W_ref.shape[1])
-                )
-            except Exception:
-                _base_kept_cols = None
-
-        def cost_lit(x):
-            q, dq, ddq_v = fourier_trajectory(x, freqs, t, q0, basis, opt_phase)
-            if opt_cond:
-                if _base_kept_cols is not None:
-                    c = _condition_cost_base_fast(q, dq, ddq_v, t, get_regressor, _base_kept_cols)
-                else:
-                    c = _condition_cost_base(q, dq, ddq_v, t, kin, get_regressor, nDoF)
+            if base_kept_cols is not None:
+                c = _condition_cost_base_fast(q, dq, ddq_v, t, get_regressor, base_kept_cols)
             else:
-                c = _amplitude_cost(dq, ddq_v)
-            if torque_method == "soft_penalty" and tau_lim is not None and nominal_params is not None:
-                design = compute_torque_design_data(
-                    q, dq, ddq_v, get_regressor, nominal_params, tau_lim,
-                    "nominal_hard", torque_cfg,
-                )
-                c += compute_soft_penalty(
-                    design["tau_nominal"],
-                    design["limit_lower"],
-                    design["limit_upper"],
-                    torque_cfg.get("soft_penalty_weight", 100.0),
-                    torque_cfg.get("soft_penalty_smoothing", 0.01),
-                )
-            return c
-
-        # Build trajectory constraints as LinearConstraint objects.
-        # Using the same oversampled grid as the dense torque validation ensures
-        # that whatever satisfies the optimisation constraints will also satisfy
-        # the post-optimisation dense check (eliminates inter-sample violations).
-        dt_con = dt_nyquist / max(1, oversample)
-        t_con = np.arange(0.0, tf + dt_con, dt_con)
-
-        if basis == "sine" or (basis == "both" and not opt_phase):
-            constraints = _build_linear_traj_constraints(
-                freqs, t_con, q0, q_lim, dq_lim, ddq_lim, nDoF, m, basis=basis
-            )
+                c = _condition_cost_base(q, dq, ddq_v, t, get_regressor)
         else:
-            constraints = _build_slsqp_constraints(
-                freqs, t, q0, basis, opt_phase, q_lim, dq_lim, ddq_lim, nDoF,
-                m=m, tf=tf,
-            )
-        constraints += _build_torque_constraints(
-            freqs, t, q0, basis, opt_phase, nDoF,
-            torque_method=torque_method,
-            tau_lim=tau_lim,
-            nominal_params=nominal_params,
-            get_regressor_fn=get_regressor,
-            torque_cfg=torque_cfg,
-        )
+            c = _amplitude_cost(dq, ddq_v)
 
-        # Build a feasible initial guess.
-        # For basis="both" the b amplitudes enter λ₁ = -2π Σ b_ij f_j which
-        # must satisfy |λ₁| ≤ lam1_bound = q_range/(2·tf).  Starting b at 1%
-        # of its (already tight) bounds still violates the λ₁ constraint, so
-        # SLSQP begins infeasible and fails after a few restoration steps.
-        # Fix: start a amplitudes at 30% of bounds (gives meaningful regressor
-        # variation and finite condition-number gradient) and b amplitudes at
-        # 0.1% (ensures |λ₁| << lam1_bound at x0).
-        rng = np.random.default_rng(42)
-        if basis == "both" and not opt_phase:
-            # Scale factor for a (cosine) amplitudes.  Each per-harmonic bound is
-            # already tight (amp_j × ωj² = ddq_max), so the sum of m harmonics
-            # coherently aligned can reach m × ddq_max.  Dividing by m ensures
-            # the worst-case summed acceleration stays within the ddq limit at x0.
-            a_scale = 0.5 / m
-            x0_list = []
-            for i in range(nDoF):
-                a_slice = bounds[i * 2 * m : i * 2 * m + m]
-                b_slice = bounds[i * 2 * m + m : i * 2 * m + 2 * m]
-                for _, hi in a_slice:
-                    x0_list.append(hi * a_scale * (1.0 + 0.05 * rng.standard_normal()))
-                for _, hi in b_slice:
-                    x0_list.append(hi * 0.001 * (1.0 + 0.05 * rng.standard_normal()))
-            x0 = np.array(x0_list)
-        else:
-            x0 = np.array([hi * 0.1 * (1.0 + 0.05 * rng.standard_normal())
-                           for _, hi in bounds])
-        x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
-
-        x0 = _build_literature_initial_guess(
-            bounds, basis, opt_phase, nDoF, m, freqs, q0, q_lim, dq_lim,
-            ddq_lim, t, tf, rng,
-        )
-        res = minimize(
-            cost_lit,
-            x0,
-            method="SLSQP",
-            constraints=constraints,
-            bounds=bounds,
-            options={"maxiter": max_iter, "disp": False, "ftol": 1e-8},
-        )
-        if not res.success:
-            logger.warning(
-                "SLSQP excitation optimisation did NOT converge: %s (nit=%d, cost=%.6f). "
-                "Consider increasing max_iter or adjusting bounds.",
-                res.message, res.nit, res.fun,
-            )
-        else:
-            logger.info("SLSQP finished: cost=%.6f, success=%s, nit=%d",
-                        res.fun, res.success, res.nit)
-
-        q_check, dq_check, ddq_check = fourier_trajectory(res.x, freqs, t, q0, basis, opt_phase)
-        violations = []
-        for i in range(nDoF):
-            if np.max(q_check[i]) > q_lim[i, 1] + 1e-6:
-                violations.append(f"q[{i}] max={np.max(q_check[i]):.4f} > {q_lim[i,1]:.4f}")
-            if np.min(q_check[i]) < q_lim[i, 0] - 1e-6:
-                violations.append(f"q[{i}] min={np.min(q_check[i]):.4f} < {q_lim[i,0]:.4f}")
-            if np.max(dq_check[i]) > dq_lim[i, 1] + 1e-6:
-                violations.append(f"dq[{i}] max={np.max(dq_check[i]):.4f} > {dq_lim[i,1]:.4f}")
-            if np.min(dq_check[i]) < dq_lim[i, 0] - 1e-6:
-                violations.append(f"dq[{i}] min={np.min(dq_check[i]):.4f} < {dq_lim[i,0]:.4f}")
-            if np.max(ddq_check[i]) > ddq_lim[i, 1] + 1e-6:
-                violations.append(f"ddq[{i}] max={np.max(ddq_check[i]):.4f} > {ddq_lim[i,1]:.4f}")
-            if np.min(ddq_check[i]) < ddq_lim[i, 0] - 1e-6:
-                violations.append(f"ddq[{i}] min={np.min(ddq_check[i]):.4f} < {ddq_lim[i,0]:.4f}")
-        if violations:
-            logger.warning("Post-optimisation constraint violations: %s", "; ".join(violations))
-
-        if torque_method in HARD_TORQUE_METHODS and tau_lim is not None and nominal_params is not None:
-            t_dense = validation_time_vector(freqs, f0, n_periods, oversample)
-            q_dense, dq_dense, ddq_dense = fourier_trajectory(
-                res.x, freqs, t_dense, q0, basis, opt_phase
-            )
+        if torque_method == "soft_penalty" and tau_lim is not None and nominal_params is not None:
             design = compute_torque_design_data(
-                q_dense, dq_dense, ddq_dense, get_regressor, nominal_params,
-                tau_lim, torque_method, torque_cfg,
+                q, dq, ddq_v, get_regressor, nominal_params, tau_lim,
+                "nominal_hard", torque_cfg,
             )
-            if not design["design_pass"]:
-                message = (
-                    f"Dense torque replay violated {torque_method} limits after optimization."
-                )
-                if torque_cfg.get("strict_validation", True):
-                    raise ValueError(message)
-                logger.warning(message)
+            c += compute_soft_penalty(
+                design["tau_nominal"],
+                design["limit_lower"],
+                design["limit_upper"],
+                torque_cfg.get("soft_penalty_weight", 100.0),
+                torque_cfg.get("soft_penalty_smoothing", 0.01),
+            )
+        return c
 
-        result = res
+    # Using the same oversampled grid as the dense torque validation ensures
+    # that optimization feasibility implies dense-validation feasibility.
+    dt_con = dt_nyquist / max(1, oversample)
+    t_con = np.arange(0.0, tf + dt_con, dt_con)
+
+    if basis == "sine" or (basis == "both" and not opt_phase):
+        constraints = _build_linear_traj_constraints(
+            freqs, t_con, q0, q_lim, dq_lim, ddq_lim, nDoF, m, basis=basis
+        )
     else:
-        raise ValueError(f"Unknown constraint style: {style}")
+        constraints = _build_slsqp_constraints(
+            freqs, t, q0, basis, opt_phase, q_lim, dq_lim, ddq_lim, nDoF,
+            m=m, tf=tf,
+        )
+    constraints += _build_torque_constraints(
+        freqs, t, q0, basis, opt_phase, nDoF,
+        torque_method=torque_method,
+        tau_lim=tau_lim,
+        nominal_params=nominal_params,
+        get_regressor_fn=get_regressor,
+        torque_cfg=torque_cfg,
+    )
+
+    rng = np.random.default_rng(42)
+    x0 = _build_literature_initial_guess(
+        bounds, basis, opt_phase, nDoF, m, freqs, q0, q_lim, dq_lim,
+        ddq_lim, t, tf, rng,
+    )
+    result = minimize(
+        cost_lit,
+        x0,
+        method="SLSQP",
+        constraints=constraints,
+        bounds=bounds,
+        options={"maxiter": max_iter, "disp": False, "ftol": 1e-8},
+    )
+    if not result.success:
+        logger.warning(
+            "SLSQP excitation optimisation did NOT converge: %s (nit=%d, cost=%.6f). "
+            "Consider increasing max_iter or adjusting bounds.",
+            result.message, result.nit, result.fun,
+        )
+    else:
+        logger.info("SLSQP finished: cost=%.6f, success=%s, nit=%d",
+                    result.fun, result.success, result.nit)
+
+    q_check, dq_check, ddq_check = fourier_trajectory(result.x, freqs, t, q0, basis, opt_phase)
+    violations = []
+    for i in range(nDoF):
+        if np.max(q_check[i]) > q_lim[i, 1] + 1e-6:
+            violations.append(f"q[{i}] max={np.max(q_check[i]):.4f} > {q_lim[i, 1]:.4f}")
+        if np.min(q_check[i]) < q_lim[i, 0] - 1e-6:
+            violations.append(f"q[{i}] min={np.min(q_check[i]):.4f} < {q_lim[i, 0]:.4f}")
+        if np.max(dq_check[i]) > dq_lim[i, 1] + 1e-6:
+            violations.append(f"dq[{i}] max={np.max(dq_check[i]):.4f} > {dq_lim[i, 1]:.4f}")
+        if np.min(dq_check[i]) < dq_lim[i, 0] - 1e-6:
+            violations.append(f"dq[{i}] min={np.min(dq_check[i]):.4f} < {dq_lim[i, 0]:.4f}")
+        if np.max(ddq_check[i]) > ddq_lim[i, 1] + 1e-6:
+            violations.append(f"ddq[{i}] max={np.max(ddq_check[i]):.4f} > {ddq_lim[i, 1]:.4f}")
+        if np.min(ddq_check[i]) < ddq_lim[i, 0] - 1e-6:
+            violations.append(f"ddq[{i}] min={np.min(ddq_check[i]):.4f} < {ddq_lim[i, 0]:.4f}")
+    if violations:
+        logger.warning("Post-optimisation constraint violations: %s", "; ".join(violations))
+
+    if torque_method in HARD_TORQUE_METHODS and tau_lim is not None and nominal_params is not None:
+        t_dense = validation_time_vector(freqs, f0, n_periods, oversample)
+        q_dense, dq_dense, ddq_dense = fourier_trajectory(
+            result.x, freqs, t_dense, q0, basis, opt_phase
+        )
+        design = compute_torque_design_data(
+            q_dense, dq_dense, ddq_dense, get_regressor, nominal_params,
+            tau_lim, torque_method, torque_cfg,
+        )
+        if not design["design_pass"]:
+            message = f"Dense torque replay violated {torque_method} limits after optimization."
+            if torque_cfg.get("strict_validation", True):
+                raise ValueError(message)
+            logger.warning(message)
 
     logger.info("Excitation optimisation done. cost=%.6f", result.fun)
     return {
@@ -421,31 +366,7 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
     }
 
 
-def _run_differential_evolution(cost, bounds, max_iter, pop_size):
-    return differential_evolution(
-        cost, bounds,
-        strategy="best1bin",
-        maxiter=max_iter,
-        popsize=pop_size,
-        tol=1e-6,
-        mutation=(0.5, 1),
-        recombination=0.7,
-        disp=False,
-        seed=42,
-    )
-
-
-def _condition_cost(q, dq, ddq, t, kin, get_reg_fn):
-    """Condition number on the full (unreduced) stacked regressor."""
-    N = t.size
-    step = max(1, N // 50)
-    indices = list(range(0, N, step))
-    rows = [get_reg_fn(q[:, idx], dq[:, idx], ddq[:, idx]) for idx in indices]
-    W = np.vstack(rows)
-    return _cond_from_matrix(W)
-
-
-def _condition_cost_base(q, dq, ddq, t, kin, get_reg_fn, nDoF):
+def _condition_cost_base(q, dq, ddq, t, get_reg_fn):
     """Condition number on the base-parameter observation matrix."""
     N = t.size
     step = max(1, N // 50)
@@ -456,7 +377,7 @@ def _condition_cost_base(q, dq, ddq, t, kin, get_reg_fn, nDoF):
     p = W.shape[1]
     pi_dummy = np.ones(p)
     try:
-        W_base, _, _, rank, _ = compute_base_parameters(W, pi_dummy, tol=1e-8)
+        W_base, _, _, _, _ = compute_base_parameters(W, pi_dummy, tol=1e-8)
     except ValueError:
         return 1e12
     return _cond_from_matrix(W_base)
@@ -501,8 +422,8 @@ def _build_linear_traj_constraints(freqs, t_con, q0, q_lim, dq_lim, ddq_lim,
       dq_i(t)  = A_dq_i  @ x
       ddq_i(t) = A_ddq_i @ x
 
-    Each row of A corresponds to one time point.  scipy processes LinearConstraint
-    objects analytically in the QP subproblem — no finite-difference Jacobians,
+    Each row of A corresponds to one time point. scipy processes LinearConstraint
+    objects analytically in the QP subproblem: no finite-difference Jacobians,
     no non-smooth argmax/argmin kinks that cause "Positive directional derivative"
     linesearch failures.
 
@@ -514,19 +435,18 @@ def _build_linear_traj_constraints(freqs, t_con, q0, q_lim, dq_lim, ddq_lim,
 
     N = len(t_con)
     n_params = nDoF * m if basis == "sine" else nDoF * 2 * m
-    twopi_f = 2.0 * np.pi * freqs  # ω_j, shape (m,)
+    twopi_f = 2.0 * np.pi * freqs
 
-    phase = np.outer(twopi_f, t_con)   # (m, N)
+    phase = np.outer(twopi_f, t_con)
     cos_h = np.cos(phase)
     sin_h = np.sin(phase)
 
-    # Per-DOF block Jacobians, each (N, m):
-    J_q_a   = (cos_h - 1.0).T                           # ∂q_i/∂a_{ij}
-    J_q_b   = (sin_h - twopi_f[:, None] * t_con).T      # ∂q_i/∂b_{ij}
-    J_dq_a  = (-twopi_f[:, None] * sin_h).T             # ∂dq_i/∂a_{ij}
-    J_dq_b  = (twopi_f[:, None] * (cos_h - 1.0)).T      # ∂dq_i/∂b_{ij}
-    J_ddq_a = (-(twopi_f ** 2)[:, None] * cos_h).T      # ∂ddq_i/∂a_{ij}
-    J_ddq_b = (-(twopi_f ** 2)[:, None] * sin_h).T      # ∂ddq_i/∂b_{ij}
+    J_q_a = (cos_h - 1.0).T
+    J_q_b = (sin_h - twopi_f[:, None] * t_con).T
+    J_dq_a = (-twopi_f[:, None] * sin_h).T
+    J_dq_b = (twopi_f[:, None] * (cos_h - 1.0)).T
+    J_ddq_a = (-(twopi_f ** 2)[:, None] * cos_h).T
+    J_ddq_b = (-(twopi_f ** 2)[:, None] * sin_h).T
 
     cons = []
     for i in range(nDoF):
@@ -692,33 +612,3 @@ def _build_torque_constraints(freqs, t, q0, basis, opt_phase, nDoF,
             cons.append(_make_rms(i))
 
     return cons
-
-
-def _penalty_soft_exp(q, dq, q_lim, dq_lim, alpha=100.0, weight=1e2):
-    """Legacy soft exponential penalties."""
-    c = 0.0
-    nDoF = q.shape[0]
-    for i in range(nDoF):
-        rng = q_lim[i, 1] - q_lim[i, 0]
-        c += np.sum(1.0 / np.exp(alpha * (q_lim[i, 1] - q[i]) / rng)
-                    + 1.0 / np.exp(alpha * (q[i] - q_lim[i, 0]) / rng)
-                    - 2.0 / np.exp(alpha / 2.0))
-        rng_v = dq_lim[i, 1] - dq_lim[i, 0]
-        c += np.sum(1.0 / np.exp(alpha * (dq_lim[i, 1] - dq[i]) / rng_v)
-                    + 1.0 / np.exp(alpha * (dq[i] - dq_lim[i, 0]) / rng_v)
-                    - 2.0 / np.exp(alpha / 2.0))
-    return weight * c
-
-
-def _penalty_sigmoid(q, dq, ddq, q_lim, dq_lim, ddq_lim,
-                     alpha_q=50.0, alpha_dq=50.0, alpha_ddq=50.0, weight=1e3):
-    """Sigmoid two-way inequality constraints (Ref-2 S4.4)."""
-    def sigmoid_pen(x, lo, hi, alpha):
-        return np.sum(2.0 / (1.0 + np.exp(alpha * (hi - x)))
-                      - 2.0 / (1.0 + np.exp(-alpha * (lo - x))))
-    c = 0.0
-    for i in range(q.shape[0]):
-        c += sigmoid_pen(q[i], q_lim[i, 0], q_lim[i, 1], alpha_q)
-        c += sigmoid_pen(dq[i], dq_lim[i, 0], dq_lim[i, 1], alpha_dq)
-        c += sigmoid_pen(ddq[i], ddq_lim[i, 0], ddq_lim[i, 1], alpha_ddq)
-    return weight * max(0.0, c)

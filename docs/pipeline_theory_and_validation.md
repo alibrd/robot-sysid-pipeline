@@ -29,7 +29,7 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 | Newton-Euler regressor | Supported |
 | Euler-Lagrange regressor | Supported |
 | Harmonic excitation with `cosine`, `sine`, `both` | Supported |
-| `legacy_excTrajGen`, `urdf_reference`, `literature_standard` excitation styles | Supported |
+| Literature-standard SLSQP excitation | Supported |
 | Friction augmentation (`none`, `viscous`, `coulomb`, `viscous_coulomb`) | Supported |
 | Zero-phase Butterworth filtering | Supported |
 | Downsampling after filtering | Supported |
@@ -567,7 +567,7 @@ $$
 \kappa_2(W^\top W) = \kappa_2(W)^2,
 $$
 
-minimizing $\kappa_2(W)$ is monotonic-equivalent to minimizing $\kappa_2(W^\top W)$ whenever $W$ has nonzero singular values. This is the basis of the code’s `_condition_cost()` and `_condition_cost_base()` implementations. See Gautier and Khalil (1992) and Swevers et al. (1997).
+minimizing $\kappa_2(W)$ is monotonic-equivalent to minimizing $\kappa_2(W^\top W)$ whenever $W$ has nonzero singular values. This is the basis of the code's `_condition_cost_base()` implementation. See Gautier and Khalil (1992) and Swevers et al. (1997).
 
 When condition-number optimization is disabled, the current code uses the fallback amplitude objective
 
@@ -577,36 +577,15 @@ $$
 
 which is an engineering heuristic for large excitation subject to limits, not a direct optimal-design criterion from the identification literature.
 
-### Constraint styles currently implemented
+### Excitation optimization currently implemented
 
-1. **`legacy_excTrajGen`**
-   - Compatibility mode for the old heuristic.
-   - Uses
-     $$
-     J_{\text{legacy}} =
-     \sum \frac{1}{\varepsilon + |q|}
-     + 100 \sum \frac{1}{\varepsilon + |\dot q|},
-     $$
-     plus soft exponential penalties.
-   - Uses differential evolution.
-
-2. **`urdf_reference`**
-   - Uses condition-number objective on the full stacked regressor when enabled.
-   - Uses the implemented two-way sigmoid penalty
-     $$
-     c(x) = \frac{2}{1+e^{\alpha(hi-x)}} - \frac{2}{1+e^{-\alpha(lo-x)}}
-     $$
-     on sampled $q$, $\dot q$, $\ddot q$.
-   - Uses differential evolution.
-
-3. **`literature_standard`**
-   - Uses condition number on the **base-parameter** observation matrix when enabled.
-   - Uses SLSQP.
-   - Uses sampled hard inequality constraints on $q$, $\dot q$, $\ddot q$.
-   - Uses the base-parameter observation matrix, which is aligned with the standard identification workflow in Gautier (1991) and Swevers et al. (1997).
+- Uses condition number on the **base-parameter** observation matrix when enabled.
+- Uses SLSQP.
+- Uses sampled hard inequality constraints on $q$, $\dot q$, $\ddot q$.
+- Uses the base-parameter observation matrix, which is aligned with the standard identification workflow in Gautier (1991) and Swevers et al. (1997).
 
 ### Torque-limited excitation extensions
-The torque-limited modes are implemented on top of `literature_standard`. Let
+The torque-limited modes are implemented on top of the literature-standard SLSQP formulation. Let
 
 $$
 \tau_k^{\mathrm{nom}} = Y_k^{\mathrm{aug}} \pi^{\mathrm{nom}},
@@ -744,7 +723,7 @@ This path is intentionally restricted to `method="newton_euler"` and synthetic
 data runs in the current implementation.
 
 ### Optimization and replay contract
-The `literature_standard` path now has several implementation-specific contracts
+The literature-standard optimizer path now has several implementation-specific contracts
 that matter for interpreting the theory:
 
 - For `basis="sine"` and `basis="both"` with `optimize_phase=false`, the
@@ -825,7 +804,7 @@ pytest tests/test_excitation_x0.py -v -k preflight
 
 **Expected output** (excerpt):
 ```
-tests/test_excitation_x0.py::test_pipeline_preflight_rejects_long_horizon_sine_before_optimization PASSED
+ tests/test_excitation_x0.py::test_preflight_rejects_sine_with_optimize_phase_on_long_horizon PASSED
 ```
 
 **What is verified**: The literature-standard initial guess remains safely
@@ -834,34 +813,33 @@ supported setup.
 
 **Run**:
 ```bash
-pytest tests/test_pipeline_theory.py::test_stage_6_literature_standard_initial_guess_keeps_high_harmonic_ddq_margin -v -s
+pytest tests/test_pipeline_theory.py::test_stage_6_initial_guess_keeps_high_harmonic_ddq_margin -v -s
 ```
 
 **Expected output** (excerpt):
 ```
-tests/test_pipeline_theory.py::test_stage_6_literature_standard_initial_guess_keeps_high_harmonic_ddq_margin PASSED
+tests/test_pipeline_theory.py::test_stage_6_initial_guess_keeps_high_harmonic_ddq_margin PASSED
 ```
 
-**What is verified**: The three excitation styles (`legacy_excTrajGen`, `urdf_reference`, `literature_standard`) dispatch to their correct solver paths (differential evolution vs `scipy.optimize.minimize`).
+**What is verified**: The literature-standard initialization stays inside the intended high-harmonic acceleration limits for the supported 20-harmonic setup.
 
 **Run**:
 ```bash
-pytest tests/test_pipeline_theory.py::test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths -v -s
+pytest tests/test_pipeline_theory.py::test_stage_6_excitation_uses_single_slsqp_path -v -s
 ```
 
 **Expected output** (excerpt):
 ```
-STAGE 6: Excitation styles dispatch to distinct solver paths
-  Differential evolution calls = 2 (expected 2: legacy + urdf_reference)
-  scipy.minimize calls         = 1 (expected 1: literature_standard)
-  VERIFIED: Each excitation style dispatches to its correct solver path
+STAGE 6: Excitation uses the single literature-standard SLSQP path
+  scipy.minimize calls = 1 (expected 1)
+  VERIFIED: Excitation dispatches to the single SLSQP solver path
 ```
 
 **What is verified** (slow): The `_condition_cost_base()` function agrees with a manual SVD-based condition-number calculation on the base-parameter observation matrix.
 
 **Run**:
 ```bash
-pytest tests/test_pipeline_theory_slow.py::test_slow_literature_standard_condition_cost_matches_manual_base_matrix --run-slow -v -s
+pytest tests/test_pipeline_theory_slow.py::test_slow_condition_cost_matches_manual_base_matrix --run-slow -v -s
 ```
 
 **Expected output** (excerpt):
@@ -908,16 +886,13 @@ tests/test_torque_constraints_slow.py::test_slow_oversampled_replay_detects_hidd
 ```
 
 ### Current implementation note
-- `legacy_excTrajGen` is intentionally kept as a compatibility mode and is **not** a literature-optimal excitation objective.
-- `urdf_reference` only enforces joint-space constraints.
-- `literature_standard` supports torque-limited excitation and is the only path that does so in the current code.
+- The literature-standard SLSQP excitation formulation supports torque-limited excitation.
 - `sequential_redesign` is an outer-loop redesign policy, not a single convex or smooth constrained problem.
 - Cartesian/workspace excitation constraints are still not implemented.
 - The code exposes `optimize_phase` only for `basis_functions="both"`.
-- `config/rrbot_single_2min_20harm_pipeline.json` currently encodes a cosine,
-  phase-optimized, 120-period soft-penalty run. It is not a repository example
-  of the long-horizon `basis_functions="both"` / `optimize_phase=false`
-  contract described above.
+- `config/rrbot_single_2min_20harm_pipeline.json` is the maintained 2-minute
+  `basis_functions="both"` / `optimize_phase=false` reference setup used by the
+  excitation preflight regression tests.
 
 ## Stage 7. Generate Synthetic Data or Load External Data
 
@@ -1477,12 +1452,12 @@ tests/test_torque_constraints.py::test_stage_7_to_12_shared_torque_harness_runs_
 | 4-5 | NE and EL produce the same torques on the default 2-DoF RRBot | [`src/dynamics_newton_euler.py`](../src/dynamics_newton_euler.py), [`src/dynamics_euler_lagrange.py`](../src/dynamics_euler_lagrange.py) | `test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques`, `test_slow_ne_el_regressors_match_across_random_default_states` |
 | 6 | Sine endpoint conditions hold on integer periods | [`src/trajectory.py`](../src/trajectory.py) | `test_stage_6_sine_basis_enforces_boundary_conditions_on_integer_periods` |
 | 6 | Unsupported noninteger sine periods are rejected | [`src/config_loader.py`](../src/config_loader.py) | `test_stage_6_noninteger_sine_periods_are_rejected_by_config` |
-| 6 | Drift-limited long-horizon sine excitation is rejected before optimization | [`src/excitation.py`](../src/excitation.py), [`src/pipeline.py`](../src/pipeline.py) | `test_pipeline_preflight_rejects_long_horizon_sine_before_optimization` |
-| 6 | The literature-standard initial guess stays inside the intended high-harmonic acceleration margin | [`src/excitation.py`](../src/excitation.py) | `test_stage_6_literature_standard_initial_guess_keeps_high_harmonic_ddq_margin` |
+| 6 | Drift-limited long-horizon sine excitation is rejected before optimization | [`src/excitation.py`](../src/excitation.py) | `test_preflight_rejects_sine_with_optimize_phase_on_long_horizon` |
+| 6 | The literature-standard initial guess stays inside the intended high-harmonic acceleration margin | [`src/excitation.py`](../src/excitation.py) | `test_stage_6_initial_guess_keeps_high_harmonic_ddq_margin` |
 | 6 | Torque-limited excitation config and design formulas match the documented methods | [`src/config_loader.py`](../src/config_loader.py), [`src/excitation.py`](../src/excitation.py), [`src/torque_constraints.py`](../src/torque_constraints.py) | `test_stage_0_config_accepts_torque_fields_and_rejects_invalid_combinations`, `test_stage_6_torque_design_dispatch_produces_expected_method_specific_fields`, `test_slow_chance_monte_carlo_empirically_respects_reported_confidence` |
 | 6 | Friction augmentation matches the documented matrices | [`src/friction.py`](../src/friction.py) | `test_stage_6_friction_regressor_augmentation_matches_supported_models` |
-| 6 | Excitation styles map to distinct solver paths | [`src/excitation.py`](../src/excitation.py) | `test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths` |
-| 6 | Condition-cost function matches manual SVD computation | [`src/excitation.py`](../src/excitation.py) | `test_slow_literature_standard_condition_cost_matches_manual_base_matrix` |
+| 6 | Excitation uses the single SLSQP solver path | [`src/excitation.py`](../src/excitation.py) | `test_stage_6_excitation_uses_single_slsqp_path` |
+| 6 | Condition-cost function matches manual SVD computation | [`src/excitation.py`](../src/excitation.py) | `test_slow_condition_cost_matches_manual_base_matrix` |
 | 7 | Synthetic data satisfies $\tau_k = Y_k \pi$ | [`src/pipeline.py`](../src/pipeline.py) | `test_stage_7_synthetic_tau_equals_regressor_times_pi` |
 | 8 | $W$ is stacked exactly as the theory states | [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_observation_matrix_matches_manual_stacking_equation` |
 | 8 | Filtering happens before downsampling | [`src/filtering.py`](../src/filtering.py), [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_filtering_happens_before_downsampling` |

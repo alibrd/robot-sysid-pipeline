@@ -26,7 +26,6 @@ def _write_config(
     method="newton_euler",
     feasibility="none",
     parameter_bounds=False,
-    constraint_style="legacy_excTrajGen",
     filtering=None,
     downsampling=None,
 ):
@@ -48,9 +47,7 @@ def _write_config(
             "num_harmonics": 1,
             "base_frequency_hz": 0.2,
             "optimize_condition_number": False,
-            "constraint_style": constraint_style,
             "optimizer_max_iter": 1,
-            "optimizer_pop_size": 2,
             "trajectory_duration_periods": 1,
         },
         "friction": {"model": "none"},
@@ -223,15 +220,10 @@ def test_stage_6_noninteger_sine_periods_are_rejected_by_config(tmp_path):
     print("  VERIFIED: Config rejects sine basis with trajectory_duration_periods=1.5")
 
 
-def test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths(monkeypatch):
+def test_stage_6_excitation_uses_single_slsqp_path(monkeypatch):
     from src.excitation import optimise_excitation
 
-    calls = {"de": 0, "minimize": 0}
-
-    def fake_de(cost, bounds, max_iter, pop_size):
-        calls["de"] += 1
-        x = np.zeros(len(bounds))
-        return SimpleNamespace(x=x, fun=float(cost(x)))
+    calls = {"minimize": 0}
 
     def fake_minimize(fun, x0, method, constraints, bounds, options):
         calls["minimize"] += 1
@@ -243,7 +235,6 @@ def test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths(monkeypatch
             message="ok",
         )
 
-    monkeypatch.setattr("src.excitation._run_differential_evolution", fake_de)
     monkeypatch.setattr("src.excitation.minimize", fake_minimize)
 
     class DummyKin:
@@ -259,24 +250,18 @@ def test_stage_6_excitation_styles_dispatch_to_distinct_solver_paths(monkeypatch
         "base_frequency_hz": 0.2,
         "optimize_condition_number": False,
         "optimizer_max_iter": 1,
-        "optimizer_pop_size": 2,
         "trajectory_duration_periods": 1,
     }
 
-    print("\nSTAGE 6: Excitation styles dispatch to distinct solver paths")
-    for style in ("legacy_excTrajGen", "urdf_reference", "literature_standard"):
-        cfg = dict(base_cfg)
-        cfg["constraint_style"] = style
-        optimise_excitation(DummyKin(), cfg, q_lim, dq_lim, ddq_lim)
+    print("\nSTAGE 6: Excitation uses the single literature-standard SLSQP path")
+    optimise_excitation(DummyKin(), dict(base_cfg), q_lim, dq_lim, ddq_lim)
 
-    print(f"  Differential evolution calls = {calls['de']} (expected 2: legacy + urdf_reference)")
-    print(f"  scipy.minimize calls         = {calls['minimize']} (expected 1: literature_standard)")
-    assert calls["de"] == 2
+    print(f"  scipy.minimize calls = {calls['minimize']} (expected 1)")
     assert calls["minimize"] == 1
-    print("  VERIFIED: Each excitation style dispatches to its correct solver path")
+    print("  VERIFIED: Excitation dispatches to the single SLSQP solver path")
 
 
-def test_stage_6_literature_standard_initial_guess_keeps_high_harmonic_ddq_margin(monkeypatch):
+def test_stage_6_initial_guess_keeps_high_harmonic_ddq_margin(monkeypatch):
     from src.excitation import optimise_excitation
     from src.torque_constraints import validation_time_vector
     from src.trajectory import fourier_trajectory
@@ -307,9 +292,7 @@ def test_stage_6_literature_standard_initial_guess_keeps_high_harmonic_ddq_margi
         "num_harmonics": 20,
         "base_frequency_hz": 0.5,
         "optimize_condition_number": False,
-        "constraint_style": "literature_standard",
         "optimizer_max_iter": 1,
-        "optimizer_pop_size": 2,
         "trajectory_duration_periods": 60,
         "torque_constraint_method": "none",
         "torque_validation_oversample_factor": 5,

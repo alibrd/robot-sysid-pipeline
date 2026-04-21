@@ -52,10 +52,9 @@ Copy `config/default_config.json` and fill in the fields. Key settings:
 | `excitation.basis_functions` | `cosine` / `sine` / `both` | Fourier basis |
 | `excitation.optimize_phase` | `true` / `false` | Phase optimisation (only used with `both`) |
 | `excitation.optimize_condition_number` | `true` / `false` | Minimize cond(Y^T Y) |
-| `excitation.constraint_style` | `legacy_excTrajGen` / `urdf_reference` / `literature_standard` | Constraint formulation |
 | `excitation.num_harmonics` | integer >= 1 | Number of Fourier harmonics (default 5) |
 | `excitation.base_frequency_hz` | float > 0 | Fundamental frequency (default 0.2 Hz) |
-| `excitation.torque_constraint_method` | `none` / `nominal_hard` / `soft_penalty` / `robust_box` / `chance` / `actuator_envelope` / `sequential_redesign` | Torque-limited excitation mode (`literature_standard` only) |
+| `excitation.torque_constraint_method` | `none` / `nominal_hard` / `soft_penalty` / `robust_box` / `chance` / `actuator_envelope` / `sequential_redesign` | Torque-limited excitation mode |
 | `excitation.torque_validation_oversample_factor` | integer >= 1 | Dense replay factor for torque validation and oversampled constraint checks |
 | `excitation.torque_constraint.*` | object | Method-specific torque settings such as uncertainty, envelope, penalty, guard-band, and redesign options |
 | `friction.model` | `none` / `viscous` / `coulomb` / `viscous_coulomb` | Friction model |
@@ -69,9 +68,8 @@ Copy `config/default_config.json` and fill in the fields. Key settings:
 | `joint_limits.acceleration` | `[[lo,hi], ...]` or `null` | Joint acceleration limits |
 | `joint_limits.torque` | `[[lo,hi], ...]` or `null` | Fallback torque limits when the URDF lacks joint effort limits |
 
-Torque-constrained excitation is currently supported only with
-`excitation.constraint_style="literature_standard"`. The method-specific
-`excitation.torque_constraint.*` keys are:
+The pipeline uses the literature-standard SLSQP excitation formulation. The
+method-specific `excitation.torque_constraint.*` keys are:
 
 - `soft_penalty`: `soft_penalty_weight`, `soft_penalty_smoothing`
 - `robust_box`: `relative_uncertainty`, `absolute_uncertainty_floor`
@@ -88,7 +86,7 @@ the implemented margin formula rather than a direct two-sided central-coverage
 percentage.
 
 `nominal_hard`, `robust_box`, `chance`, and `actuator_envelope` add hard
-torque constraints to the `literature_standard` SLSQP path. `soft_penalty`
+torque constraints to the SLSQP path. `soft_penalty`
 adds a smooth violation penalty to the objective instead, and
 `sequential_redesign` runs an outer loop that repeatedly redesigns with
 `nominal_hard`.
@@ -114,10 +112,9 @@ torque limits with this precedence:
    derivatives
 4. **Regressor setup** -- Newton-Euler (numeric recursive) or Euler-Lagrange
    (symbolic, cached as SymPy, re-lambdified on load)
-5. **Excitation design** -- Fourier trajectory optimisation with three
-   constraint styles. `legacy_excTrajGen` and `urdf_reference` enforce
-   joint-space limits only; `literature_standard` enforces joint-space limits
-   and can additionally apply torque-limited excitation. Cartesian/workspace
+5. **Excitation design** -- Fourier trajectory optimisation with the
+   literature-standard SLSQP formulation. It enforces joint-space limits and
+   can additionally apply torque-limited excitation. Cartesian/workspace
    constraints are not implemented
 6. **Data generation** -- synthetic from regressor or load external `.npz`
 7. **Observation matrix** -- stack regressors, optional Butterworth zero-phase

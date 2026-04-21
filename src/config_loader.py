@@ -8,7 +8,6 @@ from .torque_constraints import VALID_ENVELOPE_TYPES, VALID_TORQUE_METHODS
 
 _VALID_METHODS = {"newton_euler", "euler_lagrange"}
 _VALID_BASIS = {"cosine", "sine", "both"}
-_VALID_CONSTRAINT_STYLES = {"legacy_excTrajGen", "urdf_reference", "literature_standard"}
 _VALID_FRICTION = {"none", "viscous", "coulomb", "viscous_coulomb"}
 _VALID_SOLVERS = {"ols", "wls", "bounded_ls"}
 _VALID_FEASIBILITY = {"none", "lmi", "cholesky"}
@@ -48,6 +47,7 @@ def load_config_dict(user_cfg: dict,
     """
     defaults = load_default_config()
     cfg = deep_merge(defaults, deepcopy(user_cfg))
+    cfg = _strip_deprecated_excitation_keys(cfg)
     cfg = _resolve_paths(cfg, resolve_relative_to)
     if validate:
         _validate(cfg, config_path)
@@ -73,6 +73,16 @@ def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
     return resolved
 
 
+def _strip_deprecated_excitation_keys(cfg: dict) -> dict:
+    """Remove excitation config keys kept only for legacy compatibility."""
+    cleaned = deepcopy(cfg)
+    excitation = deepcopy(cleaned.get("excitation", {}))
+    excitation.pop("constraint_style", None)
+    excitation.pop("optimizer_pop_size", None)
+    cleaned["excitation"] = excitation
+    return cleaned
+
+
 def _validate(cfg: dict, path: str):
     if not cfg.get("urdf_path"):
         raise ValueError(f"[{path}] 'urdf_path' must be specified.")
@@ -86,8 +96,6 @@ def _validate(cfg: dict, path: str):
     exc = cfg["excitation"]
     if exc["basis_functions"] not in _VALID_BASIS:
         raise ValueError(f"'basis_functions' must be one of {_VALID_BASIS}")
-    if exc["constraint_style"] not in _VALID_CONSTRAINT_STYLES:
-        raise ValueError(f"'constraint_style' must be one of {_VALID_CONSTRAINT_STYLES}")
     if exc["num_harmonics"] < 1:
         raise ValueError("'num_harmonics' must be >= 1")
     if exc["base_frequency_hz"] <= 0:
@@ -114,11 +122,6 @@ def _validate(cfg: dict, path: str):
         raise ValueError("'excitation.torque_validation_oversample_factor' must be >= 1")
 
     torque_cfg = exc.get("torque_constraint", {})
-    if torque_method != "none" and exc["constraint_style"] != "literature_standard":
-        raise ValueError(
-            "Torque-constrained excitation is supported only with "
-            "constraint_style='literature_standard' in v1."
-        )
     if torque_method == "robust_box":
         if torque_cfg.get("relative_uncertainty") is None:
             raise ValueError(

@@ -13,7 +13,6 @@ sys.path.insert(0, str(ROOT))
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_RRBOT = str(ASSET_DIR / "RRBot_single.urdf")
 URDF_1DOF = str(ASSET_DIR / "SC_1DoF.urdf")
-URDF_1DOF_EFFORT = str(ASSET_DIR / "SC_1DoF_effort.urdf")
 URDF_3DOF = str(ASSET_DIR / "SC_3DoF.urdf")
 
 
@@ -48,9 +47,7 @@ def _write_torque_config(tmp_path,
             "num_harmonics": num_harmonics,
             "base_frequency_hz": 0.2,
             "optimize_condition_number": optimize_condition_number,
-            "constraint_style": "literature_standard",
             "optimizer_max_iter": max_iter,
-            "optimizer_pop_size": 4,
             "trajectory_duration_periods": 1,
             "torque_constraint_method": torque_method,
             "torque_validation_oversample_factor": 5,
@@ -90,11 +87,13 @@ def test_stage_0_config_accepts_torque_fields_and_rejects_invalid_combinations(t
     cfg = load_config(str(good))
     assert cfg["joint_limits"]["torque"][0] == [-50.0, 50.0]
     assert cfg["excitation"]["torque_constraint_method"] == "nominal_hard"
+    assert "constraint_style" not in cfg["excitation"]
+    assert "optimizer_pop_size" not in cfg["excitation"]
 
-    bad_style = tmp_path / "bad_style.json"
-    bad_style.write_text(json.dumps({
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({
         "urdf_path": URDF_RRBOT,
-        "output_dir": str(tmp_path / "bad_style_out"),
+        "output_dir": str(tmp_path / "legacy_out"),
         "joint_limits": {
             "position": [[-1.0, 1.0], [-1.0, 1.0]],
             "velocity": [[-2.0, 2.0], [-2.0, 2.0]],
@@ -103,11 +102,14 @@ def test_stage_0_config_accepts_torque_fields_and_rejects_invalid_combinations(t
         },
         "excitation": {
             "constraint_style": "legacy_excTrajGen",
+            "optimizer_pop_size": 99,
             "torque_constraint_method": "nominal_hard",
         },
     }), encoding="utf-8")
-    with pytest.raises(ValueError, match="literature_standard"):
-        load_config(str(bad_style))
+    legacy_cfg = load_config(str(legacy))
+    assert legacy_cfg["excitation"]["torque_constraint_method"] == "nominal_hard"
+    assert "constraint_style" not in legacy_cfg["excitation"]
+    assert "optimizer_pop_size" not in legacy_cfg["excitation"]
 
     bad_seq = tmp_path / "bad_seq.json"
     bad_seq.write_text(json.dumps({
@@ -140,10 +142,34 @@ def test_stage_0_config_accepts_torque_fields_and_rejects_invalid_combinations(t
         load_config(str(bad_chance))
 
 
-def test_stage_1_urdf_effort_parsing_is_preserved():
+_EFFORT_URDF = """\
+<?xml version="1.0" ?>
+<robot name="TestBot">
+  <link name="base"/>
+  <joint name="Joint_1" type="revolute">
+    <parent link="base"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="12.0" velocity="2.5" lower="-1.2" upper="1.2"/>
+  </joint>
+  <link name="link1">
+    <inertial>
+      <mass value="1.0"/>
+      <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+    </inertial>
+  </link>
+</robot>
+"""
+
+
+def test_urdf_effort_limit_is_parsed_from_joint_element(tmp_path):
     from src.urdf_parser import parse_urdf
 
-    robot = parse_urdf(URDF_1DOF_EFFORT)
+    urdf_path = tmp_path / "effort_bot.urdf"
+    urdf_path.write_text(_EFFORT_URDF, encoding="utf-8")
+
+    robot = parse_urdf(str(urdf_path))
     joint = next(j for j in robot.joints if j.name == "Joint_1")
     assert joint.limit_effort == 12.0
     assert joint.limit_velocity == 2.5
@@ -151,35 +177,30 @@ def test_stage_1_urdf_effort_parsing_is_preserved():
     assert joint.limit_upper == 1.2
 
 
-def test_stage_2_torque_limit_precedence_urdf_then_json_then_error():
+def test_torque_limit_precedence_urdf_over_json_then_json_fallback_then_error(tmp_path):
     from src.urdf_parser import extract_torque_limits, parse_urdf
 
-    robot_effort = parse_urdf(URDF_1DOF_EFFORT)
+    urdf_path = tmp_path / "effort_bot.urdf"
+    urdf_path.write_text(_EFFORT_URDF, encoding="utf-8")
+    _logger = type("L", (), {"debug": lambda *a, **kw: None})()
+
+    robot_effort = parse_urdf(str(urdf_path))
     tau_lim, sources = extract_torque_limits(
-        robot_effort,
-        {"torque": [[-99.0, 99.0]]},
-        logger=type("L", (), {"debug": lambda *args, **kwargs: None})(),
-        required=True,
+        robot_effort, {"torque": [[-99.0, 99.0]]}, logger=_logger, required=True,
     )
     np.testing.assert_allclose(tau_lim, [[-12.0, 12.0]])
     assert sources == ["urdf_effort"]
 
     robot_no_effort = parse_urdf(URDF_1DOF)
     tau_lim, sources = extract_torque_limits(
-        robot_no_effort,
-        {"torque": [[-15.0, 15.0]]},
-        logger=type("L", (), {"debug": lambda *args, **kwargs: None})(),
-        required=True,
+        robot_no_effort, {"torque": [[-15.0, 15.0]]}, logger=_logger, required=True,
     )
     np.testing.assert_allclose(tau_lim, [[-15.0, 15.0]])
     assert sources == ["json_torque"]
 
     with pytest.raises(ValueError, match="Torque limits missing"):
         extract_torque_limits(
-            robot_no_effort,
-            {"torque": None},
-            logger=type("L", (), {"debug": lambda *args, **kwargs: None})(),
-            required=True,
+            robot_no_effort, {"torque": None}, logger=_logger, required=True,
         )
 
 

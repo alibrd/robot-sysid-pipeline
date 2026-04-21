@@ -71,7 +71,7 @@ def test_slow_base_parameter_reduction_preserves_multiple_random_default_observa
 
 
 @pytest.mark.slow
-def test_slow_literature_standard_condition_cost_matches_manual_base_matrix():
+def test_slow_condition_cost_matches_manual_base_matrix():
     from src.base_parameters import compute_base_parameters
     from src.dynamics_newton_euler import newton_euler_regressor
     from src.excitation import _condition_cost_base
@@ -94,7 +94,7 @@ def test_slow_literature_standard_condition_cost_matches_manual_base_matrix():
     )
     get_reg = lambda qv, dqv, ddqv: newton_euler_regressor(kin, qv, dqv, ddqv)
 
-    cost = _condition_cost_base(q, dq, ddq, t, kin, get_reg, kin.nDoF)
+    cost = _condition_cost_base(q, dq, ddq, t, get_reg)
 
     step = max(1, t.size // 50)
     indices = list(range(0, t.size, step))
