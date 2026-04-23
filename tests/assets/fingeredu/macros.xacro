@@ -1,0 +1,46 @@
+<?xml version="1.0" ?>
+<!-- Vendored from open-dynamic-robot-initiative/robot_properties_fingers/xacro_files/macros.xacro -->
+<!-- Some macros for convenience -->
+<robot xmlns:xacro="https://ei.is.tuebingen.mpg.de/xacro">
+
+    <xacro:macro name="add_geometry"
+        params="rpy xyz mesh_file material mesh_scale:='1'">
+        <visual>
+            <origin rpy="${rpy}" xyz="${xyz}"/>
+            <geometry>
+                <mesh scale="${mesh_scale} ${mesh_scale} ${mesh_scale}" filename="${mesh_file}"/>
+            </geometry>
+            <material name="${material}" />
+        </visual>
+        <collision>
+            <origin rpy="${rpy}" xyz="${xyz}"/>
+            <geometry>
+                <mesh scale="${mesh_scale} ${mesh_scale} ${mesh_scale}" filename="${mesh_file}"/>
+            </geometry>
+        </collision>
+    </xacro:macro>
+
+    <xacro:macro name="add_visual_geometry"
+        params="rpy xyz mesh_file material mesh_scale:='1'">
+        <visual>
+            <origin rpy="${rpy}" xyz="${xyz}"/>
+            <geometry>
+                <mesh scale="${mesh_scale} ${mesh_scale} ${mesh_scale}" filename="${mesh_file}"/>
+            </geometry>
+            <material name="${material}" />
+        </visual>
+    </xacro:macro>
+
+    <xacro:macro name="add_inertia" params="length_x length_y length_z mass com">
+        <inertial>
+            <origin rpy="0 0 0" xyz="${com}"/>
+            <mass value="${mass}"/>
+            <inertia
+                    ixx="${1./12. * mass * (length_y*length_y + length_z*length_z)}"
+                    iyy="${1./12. * mass * (length_x*length_x + length_z*length_z)}"
+                    izz="${1./12. * mass * (length_x*length_x + length_y*length_y)}"
+                    ixy="0" ixz="0" iyz="0"/>
+        </inertial>
+    </xacro:macro>
+
+</robot>

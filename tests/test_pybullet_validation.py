@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_RRBOT = str(ASSET_DIR / "RRBot_single.urdf")
-URDF_1DOF = str(ASSET_DIR / "SC_1DoF.urdf")
+URDF_PENDULUM = str(ASSET_DIR / "DrakePendulum_1DoF.urdf")
+URDF_FINGEREDU = str(ASSET_DIR / "FingerEdu_3DoF.xacro")
 
 
 def _write_excitation(path: Path, params, freqs, q0, basis="cosine", optimize_phase=False):
@@ -200,8 +201,9 @@ def test_compute_torques_rejects_joint_order_mismatch(monkeypatch):
 
 @pytest.mark.skipif(importlib.util.find_spec("pybullet") is None,
                     reason="pybullet is not installed")
-def test_pybullet_validation_runner_sc_1dof(tmp_path):
+def test_pybullet_validation_runner_pendulum_1dof(tmp_path):
     from src.pybullet_validation import PyBulletValidationRunner
+    from src.urdf_parser import parse_urdf
 
     excitation_path = tmp_path / "excitation.npz"
     config_path = tmp_path / "cfg.json"
@@ -216,7 +218,7 @@ def test_pybullet_validation_runner_sc_1dof(tmp_path):
     )
     _write_validation_config(
         config_path,
-        URDF_1DOF,
+        URDF_PENDULUM,
         str(excitation_path),
         str(output_dir),
         0.5,
@@ -227,11 +229,12 @@ def test_pybullet_validation_runner_sc_1dof(tmp_path):
     )
 
     summary = PyBulletValidationRunner(str(config_path)).run()
+    robot_name = parse_urdf(URDF_PENDULUM).name
 
     assert summary["passed"]
-    assert (output_dir / "Chaser" / "pybullet_validation_summary.json").exists()
-    assert (output_dir / "Chaser" / "pybullet_validation_data.npz").exists()
-    assert (output_dir / "Chaser" / "pybullet_validation.log").exists()
+    assert (output_dir / robot_name / "pybullet_validation_summary.json").exists()
+    assert (output_dir / robot_name / "pybullet_validation_data.npz").exists()
+    assert (output_dir / robot_name / "pybullet_validation.log").exists()
 
 
 @pytest.mark.skipif(importlib.util.find_spec("pybullet") is None,
@@ -286,7 +289,7 @@ def test_pybullet_validation_runner_rejects_gravity_override(tmp_path):
     )
     _write_validation_config(
         config_path,
-        URDF_1DOF,
+        URDF_PENDULUM,
         str(excitation_path),
         str(output_dir),
         0.5,
@@ -349,6 +352,28 @@ def test_prepare_pybullet_urdf_patches_continuous_joint_limits(tmp_path):
             Path(temp_path).unlink(missing_ok=True)
 
 
+def test_prepare_pybullet_urdf_resolves_fingeredu_xacro_and_rewrites_meshes():
+    from src.pybullet_validation import _prepare_pybullet_urdf
+
+    patched_path, temp_path = _prepare_pybullet_urdf(URDF_FINGEREDU)
+    try:
+        assert temp_path is not None
+
+        root = ET.parse(patched_path).getroot()
+        assert root.get("name") == "finger"
+
+        mesh_files = [
+            mesh.get("filename")
+            for mesh in root.findall(".//mesh")
+            if mesh.get("filename") is not None
+        ]
+        assert mesh_files
+        assert all(not filename.startswith("package://") for filename in mesh_files)
+    finally:
+        if temp_path is not None:
+            Path(temp_path).unlink(missing_ok=True)
+
+
 def test_validation_config_deprecated_tolerance_rel_warns_and_migrates(tmp_path):
     from src.pybullet_validation import load_pybullet_validation_config
 
@@ -364,7 +389,7 @@ def test_validation_config_deprecated_tolerance_rel_warns_and_migrates(tmp_path)
     )
     _write_validation_config(
         config_path,
-        URDF_1DOF,
+        URDF_PENDULUM,
         str(excitation_path),
         str(tmp_path / "out"),
         0.5,
@@ -411,7 +436,7 @@ def test_pybullet_validation_runner_reports_fail_for_wrong_inertia(tmp_path, mon
     )
     _write_validation_config(
         config_path,
-        URDF_1DOF,
+        URDF_PENDULUM,
         str(excitation_path),
         str(output_dir),
         0.5,

@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tests.test_torque_constraints import _run_pipeline, _write_torque_config, URDF_3DOF
+from tests.test_torque_constraints import _run_pipeline, _write_torque_config, URDF_FINGEREDU
 
 
 @pytest.mark.slow
@@ -74,10 +74,12 @@ def test_slow_all_six_methods_emit_comparable_summary_metrics(tmp_path):
         ("robust_box", {"relative_uncertainty": 0.1, "absolute_uncertainty_floor": 1e-3}),
     ],
 )
-def test_slow_strongest_two_methods_scale_to_3dof_fixture(tmp_path, torque_method, torque_constraint):
+def test_slow_strongest_two_methods_scale_to_fingeredu_3dof_fixture(
+    tmp_path, torque_method, torque_constraint
+):
     cfg = _write_torque_config(
         tmp_path,
-        urdf_path=URDF_3DOF,
+        urdf_path=URDF_FINGEREDU,
         n_dof=3,
         torque_method=torque_method,
         torque_constraint=torque_constraint,

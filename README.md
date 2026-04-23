@@ -15,6 +15,14 @@ relevant literature, and maps each equation to implementation and tests.
 python run_pipeline.py config/my_robot.json
 ```
 
+To visualize the excitation trajectory and torque limits from a pipeline output
+directory:
+
+```bash
+python plot_excitation.py outputs/my_run/          # interactive window + PNG
+python plot_excitation.py outputs/my_run/ --save   # PNG only (headless)
+```
+
 For standalone PyBullet torque validation against a saved excitation artifact:
 
 ```bash
@@ -47,7 +55,7 @@ Copy `config/default_config.json` and fill in the fields. Key settings:
 
 | Field | Values | Description |
 |---|---|---|
-| `urdf_path` | file path | Path to the robot URDF file |
+| `urdf_path` | file path | Path to the robot URDF or xacro file |
 | `method` | `newton_euler` / `euler_lagrange` | Dynamics formulation |
 | `excitation.basis_functions` | `cosine` / `sine` / `both` | Fourier basis |
 | `excitation.optimize_phase` | `true` / `false` | Phase optimisation (only used with `both`) |
@@ -139,7 +147,13 @@ torque limits with this precedence:
 All outputs are written to `output_dir`:
 
 - `pipeline.log` -- detailed log of every stage
-- `excitation_trajectory.npz` -- optimised trajectory parameters
+- `excitation_trajectory.npz` -- optimised trajectory parameters (`params`,
+  `freqs`, `q0`, `basis`, `optimize_phase`, `cost`) plus the dense time series
+  (`t`, `q`, `dq`, `ddq`, shape `(nDoF, N)`) and joint limits (`q_lim`,
+  `dq_lim`, `ddq_lim`, shape `(nDoF, 2)`). Pass the output directory to
+  `plot_excitation.py` to visualize all joint and torque trajectories
+- `excitation_trajectory.png` -- trajectory plot written by `plot_excitation.py`
+  (not produced by the pipeline itself)
 - `torque_limit_validation.npz` -- dense replay of torque limits, torque traces,
   normalized torque ratios, and method metadata when torque-limited excitation
   is enabled; hard methods also store design margins and chance quantiles when
@@ -183,8 +197,13 @@ Install the optional validation dependency with:
 pip install pybullet
 ```
 
-For report export plots, install `matplotlib` in the same environment that runs
-`run_pybullet_validation_report.py`.
+Install `matplotlib` for trajectory visualization and report export plots:
+
+```bash
+pip install matplotlib
+```
+
+This is required by `plot_excitation.py` and `run_pybullet_validation_report.py`.
 
 ## Testing
 
@@ -222,6 +241,13 @@ contract written by the main pipeline, specifically these fields in
 - `q0`
 - `basis`
 - `optimize_phase`
+
+The same pipeline artifact also stores sampled trajectory arrays and joint-limit
+arrays for inspection and downstream tooling. Validation accepts URDF or xacro
+robot paths; xacro inputs are resolved through the `xacro` CLI into a temporary
+URDF before PyBullet loads them. Vendored FingerEdu mesh paths that use
+`package://robot_properties_fingers/meshes` are rewritten to the local test
+asset directory when those assets are present.
 
 The validator replays the excitation with the existing Fourier trajectory code,
 computes reference torques with the Newton-Euler regressor, computes PyBullet
@@ -297,7 +323,7 @@ The test suite (`tests/test_pipeline.py`) verifies:
   rejection of non-integer sine periods; EL plus constrained identification
   rejected; `cholesky` accepted as a distinct feasibility method
 - **NE / EL equivalence** -- Newton-Euler and Euler-Lagrange regressors produce
-  matching torques (default RRBot plus SC fixtures)
+  matching torques (default RRBot plus Drake pendulum / FingerEdu fixtures)
 - **Base parameter reduction** -- observation equation preserved after QR
   reduction; `pinv(P)` reconstruction consistency
 - **Filtering** -- passthrough when disabled; lowpass attenuation of
@@ -307,8 +333,10 @@ The test suite (`tests/test_pipeline.py`) verifies:
   via pseudo-inertia; projection produces PSD pseudo-inertia
 - **Sample sufficiency** -- insufficient samples raise an error
 - **End-to-end pipeline** -- default smoke tests use RRBot
-  (`tests/assets/RRBot_single.urdf`), while SC_1DoF and SC_3DoF fixtures remain
-  covered for compatibility and scalability checks
+  (`tests/assets/RRBot_single.urdf`); additional reference coverage uses
+  `DrakePendulum_1DoF.urdf`, `FingerEdu_3DoF.xacro`, and
+  `ElbowManipulator_3DoF.urdf` for 1-DoF, xacro-based 3-DoF, and spatial
+  3-DoF checks
 - **Excitation preflight** -- long-horizon sine-only setups are rejected before
   optimisation when the `lambda_1` drift cap collapses usable amplitudes
 - **Torque-limited excitation** -- torque limit sourcing, per-method design

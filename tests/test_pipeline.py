@@ -15,8 +15,9 @@ sys.path.insert(0, str(ROOT))
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_DIR = ASSET_DIR
 URDF_RRBOT = str(URDF_DIR / "RRBot_single.urdf")
-URDF_1DOF = str(URDF_DIR / "SC_1DoF.urdf")
-URDF_3DOF = str(URDF_DIR / "SC_3DoF.urdf")
+URDF_PENDULUM = str(URDF_DIR / "DrakePendulum_1DoF.urdf")
+URDF_FINGEREDU = str(URDF_DIR / "FingerEdu_3DoF.xacro")
+URDF_ELBOW = str(URDF_DIR / "ElbowManipulator_3DoF.urdf")
 URDF_DEFAULT = URDF_RRBOT
 
 
@@ -34,29 +35,135 @@ class TestURDFParsing:
 
     def test_1dof_chain_and_tw0(self):
         from src.urdf_parser import parse_urdf
-        r = parse_urdf(URDF_1DOF)
+        r = parse_urdf(URDF_PENDULUM)
         assert r.nDoF == 1
-        np.testing.assert_allclose(r.Tw_0, np.eye(4), atol=1e-14)
+        assert r.Tw_0.shape == (4, 4)
+        # Drake pendulum: base_weld joint places the base at z=1.0
+        np.testing.assert_allclose(r.Tw_0[:3, :3], np.eye(3), atol=1e-14)
+        np.testing.assert_allclose(r.Tw_0[2, 3], 1.0, atol=1e-14)
 
     def test_3dof_chain_and_tw0(self):
         from src.urdf_parser import parse_urdf
-        r = parse_urdf(URDF_3DOF)
+        r = parse_urdf(URDF_FINGEREDU)
         assert r.nDoF == 3
         assert r.Tw_0.shape == (4, 4)
         assert r.Tw_0[2, 3] != 0.0 or np.allclose(r.Tw_0, np.eye(4))
 
     def test_chain_order_is_topological(self):
         from src.urdf_parser import parse_urdf
-        r = parse_urdf(URDF_3DOF)
+        r = parse_urdf(URDF_FINGEREDU)
         for i in range(len(r.chain_joints) - 1):
             assert r.chain_joints[i].child == r.chain_joints[i + 1].parent
 
     def test_revolute_names_match_chain(self):
         from src.urdf_parser import parse_urdf
-        r = parse_urdf(URDF_3DOF)
+        r = parse_urdf(URDF_FINGEREDU)
         rev_from_chain = [j.name for j in r.chain_joints
                           if j.joint_type in ("revolute", "continuous")]
         assert r.revolute_joint_names == rev_from_chain
+
+
+class TestElbowManipulator3DoF:
+    """Smoke-tests for the 3-DOF elbow manipulator URDF fixture."""
+
+    def test_urdf_parses_to_3dof(self):
+        from src.urdf_parser import parse_urdf
+
+        r = parse_urdf(URDF_ELBOW)
+        assert r.nDoF == 3
+        assert r.revolute_joint_names == ["joint1", "joint2", "joint3"]
+
+    def test_tw0_is_identity(self):
+        """base_fixed places base_link at origin, so Tw_0 stays identity."""
+        from src.urdf_parser import parse_urdf
+
+        r = parse_urdf(URDF_ELBOW)
+        np.testing.assert_allclose(r.Tw_0, np.eye(4), atol=1e-14)
+
+    def test_joint_axes(self):
+        """joint1 must be Z; joint2 and joint3 must be Y."""
+        from src.urdf_parser import parse_urdf
+
+        r = parse_urdf(URDF_ELBOW)
+        joints = {j.name: j for j in r.joints}
+        np.testing.assert_allclose(joints["joint1"].axis, [0, 0, 1], atol=1e-9)
+        np.testing.assert_allclose(joints["joint2"].axis, [0, 1, 0], atol=1e-9)
+        np.testing.assert_allclose(joints["joint3"].axis, [0, 1, 0], atol=1e-9)
+
+    def test_link_masses(self):
+        from src.urdf_parser import parse_urdf
+
+        r = parse_urdf(URDF_ELBOW)
+        assert r.links["link1"].inertial.mass == pytest.approx(3.0)
+        assert r.links["link2"].inertial.mass == pytest.approx(2.0)
+        assert r.links["link3"].inertial.mass == pytest.approx(1.0)
+
+    def test_pipeline_smoke_newton_euler(self, tmp_path):
+        """End-to-end pipeline run with newton_euler and 5 harmonics."""
+        from src.pipeline import SystemIdentificationPipeline
+
+        cfg = {
+            "urdf_path": URDF_ELBOW,
+            "output_dir": str(tmp_path / "out"),
+            "method": "newton_euler",
+            "joint_limits": {
+                "position": [[-3.14159, 3.14159], [-1.5708, 1.5708], [-1.5708, 1.5708]],
+                "velocity": [[-3.0, 3.0], [-3.0, 3.0], [-3.0, 3.0]],
+                "acceleration": [[-8.0, 8.0], [-8.0, 8.0], [-8.0, 8.0]],
+            },
+            "excitation": {
+                "num_harmonics": 5,
+                "base_frequency_hz": 0.5,
+                "trajectory_duration_periods": 4,
+                "optimize_condition_number": True,
+                "optimizer_max_iter": 300,
+            },
+            "identification": {
+                "solver": "ols",
+                "feasibility_method": "none",
+            },
+        }
+
+        pipeline = SystemIdentificationPipeline(cfg)
+        pipeline.run()
+
+        results = np.load(str(tmp_path / "out" / "identification_results.npz"), allow_pickle=True)
+        assert int(results["nDoF"]) == 3
+        assert np.isfinite(float(results["residual"]))
+        assert len(results["pi_identified"]) > 0
+
+    def test_base_parameter_count_reasonable(self, tmp_path):
+        """Base reduction should keep a plausible count for a 3-DoF rigid-body model."""
+        from src.pipeline import SystemIdentificationPipeline
+
+        cfg = {
+            "urdf_path": URDF_ELBOW,
+            "output_dir": str(tmp_path / "out"),
+            "method": "newton_euler",
+            "joint_limits": {
+                "position": [[-3.14159, 3.14159], [-1.5708, 1.5708], [-1.5708, 1.5708]],
+                "velocity": [[-3.0, 3.0], [-3.0, 3.0], [-3.0, 3.0]],
+                "acceleration": [[-8.0, 8.0], [-8.0, 8.0], [-8.0, 8.0]],
+            },
+            "excitation": {
+                "num_harmonics": 5,
+                "base_frequency_hz": 0.5,
+                "trajectory_duration_periods": 4,
+                "optimize_condition_number": True,
+                "optimizer_max_iter": 300,
+            },
+            "identification": {
+                "solver": "ols",
+                "feasibility_method": "none",
+            },
+        }
+
+        pipeline = SystemIdentificationPipeline(cfg)
+        pipeline.run()
+
+        results = np.load(str(tmp_path / "out" / "identification_results.npz"), allow_pickle=True)
+        n_base = len(results["pi_base"])
+        assert 10 <= n_base <= 30, f"Unexpected base parameter count: {n_base}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -114,7 +221,7 @@ class TestTrajectoryBoundary:
         """Config validation must reject sine with non-integer periods."""
         from src.config_loader import load_config
         cfg_data = {
-            "urdf_path": URDF_1DOF,
+            "urdf_path": URDF_PENDULUM,
             "output_dir": "dummy",
             "excitation": {
                 "basis_functions": "sine",
@@ -136,7 +243,7 @@ class TestTrajectoryBoundary:
         """Config validation must accept sine with integer periods."""
         from src.config_loader import load_config
         cfg_data = {
-            "urdf_path": URDF_1DOF,
+            "urdf_path": URDF_PENDULUM,
             "output_dir": "dummy",
             "excitation": {
                 "basis_functions": "sine",
@@ -160,7 +267,7 @@ class TestTrajectoryBoundary:
         import tempfile, os
         for feas in ("lmi", "cholesky"):
             cfg_data = {
-                "urdf_path": URDF_1DOF,
+                "urdf_path": URDF_PENDULUM,
                 "output_dir": "dummy",
                 "method": "euler_lagrange",
                 "identification": {"feasibility_method": feas},
@@ -180,7 +287,7 @@ class TestTrajectoryBoundary:
         from src.config_loader import load_config
         import tempfile, os, warnings
         cfg_data = {
-            "urdf_path": URDF_1DOF,
+            "urdf_path": URDF_PENDULUM,
             "output_dir": "dummy",
             "method": "newton_euler",
             "identification": {"feasibility_method": "cholesky"},
@@ -215,13 +322,13 @@ class TestNEvsEL:
     def kin_3dof(self):
         from src.urdf_parser import parse_urdf
         from src.kinematics import RobotKinematics
-        return RobotKinematics(parse_urdf(URDF_3DOF))
+        return RobotKinematics(parse_urdf(URDF_FINGEREDU))
 
     @pytest.fixture
     def kin_1dof(self):
         from src.urdf_parser import parse_urdf
         from src.kinematics import RobotKinematics
-        return RobotKinematics(parse_urdf(URDF_1DOF))
+        return RobotKinematics(parse_urdf(URDF_PENDULUM))
 
     def _compare(self, kin, cache_dir, n_states=5):
         import shutil
@@ -459,7 +566,7 @@ class TestSampleSufficiency:
         from src.kinematics import RobotKinematics
         from src.dynamics_newton_euler import newton_euler_regressor
 
-        kin = RobotKinematics(parse_urdf(URDF_3DOF))
+        kin = RobotKinematics(parse_urdf(URDF_FINGEREDU))
         # Only 1 time sample for 3-DoF (3 equations for ~19+ unknowns)
         q = np.zeros((1, 3))
         dq = np.zeros((1, 3))
@@ -541,7 +648,7 @@ class TestPipelineSmoke:
 
     def test_ne_1dof(self, tmp_path):
         from src.pipeline import SystemIdentificationPipeline
-        cfg = self._make_config(tmp_path, URDF_1DOF, n_dof=1)
+        cfg = self._make_config(tmp_path, URDF_PENDULUM, n_dof=1)
         pipe = SystemIdentificationPipeline(cfg)
         pipe.run()
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),
@@ -550,7 +657,7 @@ class TestPipelineSmoke:
 
     def test_ne_3dof(self, tmp_path):
         from src.pipeline import SystemIdentificationPipeline
-        cfg = self._make_config(tmp_path, URDF_3DOF, n_dof=3)
+        cfg = self._make_config(tmp_path, URDF_FINGEREDU, n_dof=3)
         pipe = SystemIdentificationPipeline(cfg)
         pipe.run()
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),
@@ -588,10 +695,10 @@ class TestPipelineSmoke:
             assert is_pseudo_inertia_psd(pi_corrected[:10])
 
     @pytest.mark.parametrize("urdf,n_dof", [
-        (URDF_1DOF, 1),
-        (URDF_3DOF, 3),
+        (URDF_PENDULUM, 1),
+        (URDF_FINGEREDU, 3),
     ])
-    def test_ne_sc_models_remain_functional(self, tmp_path, urdf, n_dof):
+    def test_ne_reference_models_remain_functional(self, tmp_path, urdf, n_dof):
         from src.pipeline import SystemIdentificationPipeline
         cfg = self._make_config(tmp_path, urdf, n_dof=n_dof)
         pipe = SystemIdentificationPipeline(cfg)

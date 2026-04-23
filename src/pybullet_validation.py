@@ -15,7 +15,7 @@ from .kinematics import RobotKinematics
 from .math_utils import GRAVITY
 from .pipeline_logger import setup_logger
 from .trajectory import build_frequencies, fourier_trajectory
-from .urdf_parser import parse_urdf
+from .urdf_parser import parse_urdf, resolve_xacro_to_urdf_xml
 
 
 def load_default_pybullet_validation_config() -> dict:
@@ -479,12 +479,9 @@ def _prepare_pybullet_urdf(urdf_path: str):
     """Return a PyBullet-loadable URDF path, patching missing revolute limits."""
     source_path = Path(urdf_path)
     if source_path.suffix.lower() == ".xacro":
-        raise RuntimeError(
-            "PyBullet validation currently requires a resolved .urdf file. "
-            "Provide a plain URDF path instead of a .xacro file."
-        )
-
-    tree = ET.parse(source_path)
+        tree = ET.ElementTree(ET.fromstring(resolve_xacro_to_urdf_xml(source_path)))
+    else:
+        tree = ET.parse(source_path)
     root = tree.getroot()
     modified = False
     default_limit_attrs = {
@@ -506,6 +503,11 @@ def _prepare_pybullet_urdf(urdf_path: str):
                 limit_el.set(key, value)
                 modified = True
 
+    if _rewrite_known_package_uris(root, source_path):
+        modified = True
+    if source_path.suffix.lower() == ".xacro":
+        modified = True
+
     if not modified:
         return str(source_path), None
 
@@ -516,6 +518,26 @@ def _prepare_pybullet_urdf(urdf_path: str):
     ) as tmp:
         tree.write(tmp, encoding="utf-8", xml_declaration=True)
         return tmp.name, tmp.name
+
+
+def _rewrite_known_package_uris(root: ET.Element, source_path: Path) -> bool:
+    """Rewrite vendored package URIs into absolute paths for local loading.
+
+    Returns ``True`` if any element was rewritten.
+    """
+    package_prefix = "package://robot_properties_fingers/meshes"
+    local_mesh_dir = source_path.parent / "fingeredu" / "meshes"
+    if not local_mesh_dir.exists():
+        return False
+
+    mesh_root = local_mesh_dir.resolve().as_posix()
+    rewrote = False
+    for mesh_el in root.findall(".//mesh"):
+        filename = mesh_el.get("filename")
+        if filename and filename.startswith(package_prefix):
+            mesh_el.set("filename", filename.replace(package_prefix, mesh_root, 1))
+            rewrote = True
+    return rewrote
 
 
 def _import_pybullet():

@@ -43,7 +43,7 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 | Automatic differentiation from raw $q$ to $\dot q,\ddot q$ | **Not implemented**; external data must provide `dq` and `ddq` |
 
 ### Standalone evidence
-- Internal URDF fixtures live in [`tests/assets`](../tests/assets), so the verification suite no longer depends on sibling directories.
+- Internal URDF and xacro fixtures live in [`tests/assets`](../tests/assets), including RRBot, Drake pendulum, FingerEdu, and Elbow manipulator reference models.
 - The default verification suite is in [`tests/test_pipeline_theory.py`](../tests/test_pipeline_theory.py).
 - The optional deeper verification suite is in [`tests/test_pipeline_theory_slow.py`](../tests/test_pipeline_theory_slow.py) and is enabled with `--run-slow`.
 - Excitation preflight regressions live in [`tests/test_excitation_x0.py`](../tests/test_excitation_x0.py).
@@ -85,7 +85,7 @@ This is standard rigid-body kinematics, as used throughout robot modeling texts 
 - Serial-chain extraction and `Tw_0` construction: `parse_urdf()`
 
 The parser:
-- resolves `.xacro` files through the `xacro` CLI,
+- resolves `.xacro` files through the `xacro` CLI using the xacro file's parent directory as the working directory,
 - reads links, joints, inertial blocks, and limits,
 - extracts one serial chain by topology walk,
 - accumulates fixed transforms before the first revolute joint into `Tw_0`.
@@ -109,22 +109,28 @@ STAGE 1 & 3: URDF parsing and inertial-parameter vector construction
   VERIFIED: URDF parsed correctly, PI vector matches expected values (atol=1e-12)
 ```
 
-**What is verified**: The SC_1DoF and SC_3DoF alternative fixtures parse correctly.
+**What is verified**: The Drake pendulum and FingerEdu reference fixtures parse correctly.
 
 **Run**:
 ```bash
-pytest tests/test_pipeline_theory.py::test_stage_1_sc_reference_models_remain_supported -v -s
+pytest tests/test_pipeline_theory.py::test_stage_1_reference_models_remain_supported -v -s
 ```
 
 **Expected output** (excerpt):
 ```
 STAGE 1: Additional URDF fixtures remain supported
-  SC_1DoF nDoF = 1
-  SC_3DoF nDoF = 3
-  VERIFIED: SC_1DoF and SC_3DoF fixtures parse correctly
+  DrakePendulum_1DoF nDoF = 1
+  FingerEdu_3DoF nDoF = 3
+  VERIFIED: DrakePendulum_1DoF and FingerEdu_3DoF fixtures parse correctly
 ```
 
 - Existing chain-order and `Tw_0` checks: [`tests/test_pipeline.py`](../tests/test_pipeline.py)
+- Elbow manipulator parsing checks cover a spatial 3-DoF RRR fixture with
+  expected joint names, axes, masses, identity `Tw_0`, Newton-Euler pipeline
+  smoke coverage, and base-parameter count plausibility:
+  [`tests/test_pipeline.py`](../tests/test_pipeline.py). A slow workflow check
+  exercises the same fixture through pipeline and PyBullet validation:
+  [`tests/test_workflow.py`](../tests/test_workflow.py).
 
 ## Stage 2. Resolve Joint Limits, Resolve Torque Limits When Needed, and Fail Early
 
@@ -723,7 +729,7 @@ This path is intentionally restricted to `method="newton_euler"` and synthetic
 data runs in the current implementation.
 
 ### Optimization and replay contract
-The literature-standard optimizer path now has several implementation-specific contracts
+The literature-standard optimizer path has several implementation-specific contracts
 that matter for interpreting the theory:
 
 - For `basis="sine"` and `basis="both"` with `optimize_phase=false`, the
@@ -1349,17 +1355,31 @@ The pipeline writes:
 
 These are orchestrated from [`src/pipeline.py`](../src/pipeline.py), with logging configured in [`src/pipeline_logger.py`](../src/pipeline_logger.py).
 
+The excitation artifact stores the Fourier replay contract (`params`, `freqs`,
+`q0`, `basis`, `optimize_phase`, `cost`) plus sampled time-series arrays
+(`t`, `q`, `dq`, `ddq`) and joint-limit arrays (`q_lim`, `dq_lim`, `ddq_lim`).
+The sampled joint arrays are stored with joints as rows, matching the plotting
+and inspection utilities.
+
 The torque-validation artifact stores the dense replay grid, actual torque
 limits, replayed nominal/identified/corrected torques, normalized torque ratios,
 torque-limit provenance, and sequential redesign history when that mode is used.
 For hard torque methods it also stores design margins, and for the chance method
 it stores the applied Gaussian quantile.
 
-The human-readable summary now also reports the torque method, torque-limit
+The human-readable summary reports the torque method, torque-limit
 source, nominal/identified/corrected pass flags, worst normalized torque ratio,
 worst joint, worst replay time, and any sequential redesign history. The binary
 identification artifact stores the same method metadata alongside the identified
 parameter arrays.
+
+The standalone PyBullet validation path in
+[`src/pybullet_validation.py`](../src/pybullet_validation.py) accepts URDF and
+xacro robot paths. Xacro inputs are resolved through the `xacro` CLI into a
+temporary loadable URDF, revolute and continuous joints receive missing limit
+attributes before loading, and known vendored FingerEdu
+`package://robot_properties_fingers/meshes` URIs are rewritten to local mesh
+asset paths when the assets are present.
 
 ### Important semantic distinction
 Pipeline completion and physical feasibility are **not** the same statement.
@@ -1446,6 +1466,7 @@ tests/test_torque_constraints.py::test_stage_7_to_12_shared_torque_harness_runs_
 | Stage | Main claim | Code | Verification |
 |---|---|---|---|
 | 1 | Standalone URDF parsing and serial-chain extraction work | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_1_and_3_parser_and_kinematics_build_standalone_model` |
+| 1 | Reference fixtures cover Drake pendulum, FingerEdu xacro, and spatial Elbow manipulator models | [`src/urdf_parser.py`](../src/urdf_parser.py), [`src/pipeline.py`](../src/pipeline.py), [`src/workflow.py`](../src/workflow.py) | `test_stage_1_reference_models_remain_supported`, `TestElbowManipulator3DoF`, `test_elbow_workflow_end_to_end` |
 | 2 | Missing limits are rejected clearly | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_2_joint_limit_extraction_rejects_missing_json_overrides` |
 | 2 | Torque limits use URDF effort first, JSON fallback second, and fail clearly when required | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_2_torque_limit_precedence_urdf_then_json_then_error` |
 | 3 | The inertial parameter vector matches the URDF data and parallel-axis shift | [`src/kinematics.py`](../src/kinematics.py) | `test_stage_1_and_3_parser_and_kinematics_build_standalone_model` |

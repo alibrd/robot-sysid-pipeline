@@ -1,0 +1,161 @@
+<?xml version="1.0"?>
+<!-- 3-DOF Elbow Manipulator (spatial RRR arm)
+     Inspired by: Robotawi/rrr-arm (https://github.com/Robotawi/rrr-arm)
+     Textbook reference: Spong, Hutchinson & Vidyasagar "Robot Modeling and Control",
+     Chapter 3 - Elbow Manipulator example.
+
+     Kinematic chain (all joints revolute):
+       joint1 - waist   : axis Z, at top of base_link (z=0.2 m)
+       joint2 - shoulder: axis Y, at top of link1    (dz=0.5 m)
+       joint3 - elbow   : axis Y, at end of link2    (dx=0.4 m)
+
+     Inertial values are for uniform solid cylinders.
+     Cylinder inertia formulae (axis along principal axis a):
+       I_a  = m r^2 / 2
+       I_bc = m (3r^2 + L^2) / 12
+
+     base_link  : r=0.10 m, L=0.20 m, m=5.0 kg - axis Z
+       I_zz = 5*0.01/2            = 0.025000
+       I_xx = 5*(0.03+0.04)/12    = 0.029167
+
+     link1      : r=0.05 m, L=0.50 m, m=3.0 kg - axis Z
+       I_zz = 3*0.0025/2          = 0.003750
+       I_xx = 3*(0.0075+0.25)/12  = 0.064375
+
+     link2      : r=0.04 m, L=0.40 m, m=2.0 kg - axis X (when q2=0)
+       I_xx = 2*0.0016/2          = 0.001600
+       I_yy = 2*(0.0048+0.16)/12  = 0.027467
+
+     link3      : r=0.03 m, L=0.30 m, m=1.0 kg - axis X (when q3=0)
+       I_xx = 1*0.0009/2          = 0.000450
+       I_yy = 1*(0.0027+0.09)/12  = 0.007725
+-->
+<robot name="elbow_3dof">
+
+  <link name="world"/>
+
+  <joint name="base_fixed" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.1" length="0.2"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.1" length="0.2"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="5.0"/>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <inertia ixx="0.029167" ixy="0" ixz="0"
+               iyy="0.029167" iyz="0"
+               izz="0.025000"/>
+    </inertial>
+  </link>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159265" upper="3.14159265"
+           effort="150.0" velocity="3.0"/>
+    <dynamics damping="0.5" friction="0.0"/>
+  </joint>
+
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.25" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.5"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.25" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.5"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="3.0"/>
+      <origin xyz="0 0 0.25" rpy="0 0 0"/>
+      <inertia ixx="0.064375" ixy="0" ixz="0"
+               iyy="0.064375" iyz="0"
+               izz="0.003750"/>
+    </inertial>
+  </link>
+
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.5" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5707963" upper="1.5707963"
+           effort="100.0" velocity="3.0"/>
+    <dynamics damping="0.5" friction="0.0"/>
+  </joint>
+
+  <link name="link2">
+    <visual>
+      <origin xyz="0.2 0 0" rpy="0 1.5707963 0"/>
+      <geometry><cylinder radius="0.04" length="0.4"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.2 0 0" rpy="0 1.5707963 0"/>
+      <geometry><cylinder radius="0.04" length="0.4"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="2.0"/>
+      <origin xyz="0.2 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.001600" ixy="0" ixz="0"
+               iyy="0.027467" iyz="0"
+               izz="0.027467"/>
+    </inertial>
+  </link>
+
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0.4 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5707963" upper="1.5707963"
+           effort="50.0" velocity="3.0"/>
+    <dynamics damping="0.3" friction="0.0"/>
+  </joint>
+
+  <link name="link3">
+    <visual>
+      <origin xyz="0.15 0 0" rpy="0 1.5707963 0"/>
+      <geometry><cylinder radius="0.03" length="0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.15 0 0" rpy="0 1.5707963 0"/>
+      <geometry><cylinder radius="0.03" length="0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0.15 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.000450" ixy="0" ixz="0"
+               iyy="0.007725" iyz="0"
+               izz="0.007725"/>
+    </inertial>
+  </link>
+
+  <link name="tcp_link">
+    <inertial>
+      <mass value="0.001"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0"
+               iyy="1e-6" iyz="0"
+               izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <joint name="tcp_fixed" type="fixed">
+    <parent link="link3"/>
+    <child link="tcp_link"/>
+    <origin xyz="0.3 0 0" rpy="0 0 0"/>
+  </joint>
+
+</robot>

@@ -1,6 +1,5 @@
 """URDF/XACRO XML parser: extracts joint chain, inertial parameters, and joint limits."""
 import subprocess
-import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,9 +66,7 @@ class RobotDescription:
 
 def parse_urdf(urdf_path: str) -> RobotDescription:
     """Parse a URDF (or .xacro) file and return structured robot description."""
-    resolved = _resolve_xacro(urdf_path)
-    tree = ET.parse(resolved)
-    root = tree.getroot()
+    root = _load_robot_root(urdf_path)
     robot_name = root.get("name", "unnamed_robot")
 
     # -- Parse all joints ----------------------------------------------------
@@ -305,19 +302,16 @@ def extract_torque_limits(robot: RobotDescription,
     return tau_lim, sources
 
 
-def _resolve_xacro(urdf_path: str) -> str:
-    """If *urdf_path* ends with ``.xacro``, run ``xacro`` to produce URDF XML.
-
-    Returns the path to a plain URDF (either the original or a temp file).
-    """
-    p = Path(urdf_path)
-    if p.suffix.lower() != ".xacro":
-        return str(p)
-
+def resolve_xacro_to_urdf_xml(xacro_path: str | Path) -> str:
+    """Resolve a xacro file into URDF XML text."""
+    p = Path(xacro_path).resolve()
     try:
         result = subprocess.run(
             ["xacro", str(p)],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(p.parent),
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -327,9 +321,12 @@ def _resolve_xacro(urdf_path: str) -> str:
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"xacro failed on '{p}':\n{exc.stderr}") from exc
 
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=".urdf", delete=False, mode="w", encoding="utf-8"
-    )
-    tmp.write(result.stdout)
-    tmp.close()
-    return tmp.name
+    return result.stdout
+
+
+def _load_robot_root(urdf_path: str) -> ET.Element:
+    """Load the robot XML root from a URDF or xacro path."""
+    p = Path(urdf_path)
+    if p.suffix.lower() != ".xacro":
+        return ET.parse(p).getroot()
+    return ET.fromstring(resolve_xacro_to_urdf_xml(p))

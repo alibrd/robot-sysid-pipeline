@@ -380,8 +380,19 @@ class SystemIdentificationPipeline:
             log.info("Excitation cost: %.6f", exc_result["cost"])
 
             exc_path = self.output_dir / "excitation_trajectory.npz"
-            np.savez(str(exc_path), **exc_result)
-            log.info("Saved excitation parameters to %s", exc_path)
+            t_exc, q_exc_T, dq_exc_T, ddq_exc_T, _ = _excitation_time_series(exc_result)
+            np.savez(
+                str(exc_path),
+                **exc_result,
+                t=t_exc,
+                q=q_exc_T.T,
+                dq=dq_exc_T.T,
+                ddq=ddq_exc_T.T,
+                q_lim=q_lim,
+                dq_lim=dq_lim if dq_lim is not None else np.zeros((0, 2)),
+                ddq_lim=ddq_lim if ddq_lim is not None else np.zeros((0, 2)),
+            )
+            log.info("Saved excitation trajectory to %s", exc_path)
 
             torque_validation, torque_summary = _validate_torque_models(
                 exc_result,

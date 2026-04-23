@@ -13,8 +13,8 @@ sys.path.insert(0, str(ROOT))
 
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_RRBOT = str(ASSET_DIR / "RRBot_single.urdf")
-URDF_1DOF = str(ASSET_DIR / "SC_1DoF.urdf")
-URDF_3DOF = str(ASSET_DIR / "SC_3DoF.urdf")
+URDF_PENDULUM = str(ASSET_DIR / "DrakePendulum_1DoF.urdf")
+URDF_FINGEREDU = str(ASSET_DIR / "FingerEdu_3DoF.xacro")
 URDF_DEFAULT = URDF_RRBOT
 
 
@@ -562,18 +562,18 @@ def test_stage_12_constrained_lmi_returns_feasible_newton_euler_model(tmp_path):
     print("  VERIFIED: LMI-constrained model is feasible with J_i >= 0 for all links")
 
 
-def test_stage_1_sc_reference_models_remain_supported():
+def test_stage_1_reference_models_remain_supported():
     from src.urdf_parser import parse_urdf
 
-    r1 = parse_urdf(URDF_1DOF)
-    r3 = parse_urdf(URDF_3DOF)
+    r1 = parse_urdf(URDF_PENDULUM)
+    r3 = parse_urdf(URDF_FINGEREDU)
 
     print("\nSTAGE 1: Additional URDF fixtures remain supported")
-    print(f"  SC_1DoF nDoF = {r1.nDoF}")
-    print(f"  SC_3DoF nDoF = {r3.nDoF}")
+    print(f"  DrakePendulum_1DoF nDoF = {r1.nDoF}")
+    print(f"  FingerEdu_3DoF nDoF = {r3.nDoF}")
     assert r1.nDoF == 1
     assert r3.nDoF == 3
-    print("  VERIFIED: SC_1DoF and SC_3DoF fixtures parse correctly")
+    print("  VERIFIED: DrakePendulum_1DoF and FingerEdu_3DoF fixtures parse correctly")
 
 
 # ---------------------------------------------------------------------------

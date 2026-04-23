@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_RRBOT = ASSET_DIR / "RRBot_single.urdf"
-URDF_1DOF = ASSET_DIR / "SC_1DoF.urdf"
+URDF_PENDULUM = ASSET_DIR / "DrakePendulum_1DoF.urdf"
+URDF_ELBOW = ASSET_DIR / "ElbowManipulator_3DoF.urdf"
 
 
 def _write_json(path: Path, payload: dict) -> Path:
@@ -238,7 +239,7 @@ def test_mismatched_pipeline_and_validation_urdfs_fail_preflight(tmp_path, monke
     excitation_file = _write_excitation(tmp_path / "excitation.npz")
     validation_cfg = _write_validation_config(
         tmp_path / "validation.json",
-        URDF_1DOF,
+        URDF_PENDULUM,
         excitation_file,
     )
     workflow_cfg = _write_json(
@@ -424,14 +425,14 @@ def test_validation_config_loader_resolves_relative_paths(tmp_path):
     from src.pybullet_validation import load_pybullet_validation_config
 
     config_dir = tmp_path / "cfg"
-    urdf_copy = tmp_path / "assets" / "SC_1DoF.urdf"
+    urdf_copy = tmp_path / "assets" / "DrakePendulum_1DoF.urdf"
     urdf_copy.parent.mkdir(parents=True)
-    shutil.copy2(URDF_1DOF, urdf_copy)
+    shutil.copy2(URDF_PENDULUM, urdf_copy)
     excitation_file = _write_excitation(tmp_path / "data" / "excitation.npz")
     config_path = _write_json(
         config_dir / "validation.json",
         {
-            "urdf_path": "../assets/SC_1DoF.urdf",
+            "urdf_path": "../assets/DrakePendulum_1DoF.urdf",
             "excitation_file": "../data/excitation.npz",
             "output_dir": "../validation_output",
             "base_frequency_hz": 0.5,
@@ -441,7 +442,7 @@ def test_validation_config_loader_resolves_relative_paths(tmp_path):
 
     cfg = load_pybullet_validation_config(str(config_path))
 
-    assert cfg["urdf_path"] == str((config_dir / "../assets/SC_1DoF.urdf").resolve())
+    assert cfg["urdf_path"] == str((config_dir / "../assets/DrakePendulum_1DoF.urdf").resolve())
     assert cfg["excitation_file"] == str(excitation_file.resolve())
     assert cfg["output_dir"] == str((config_dir / "../validation_output").resolve())
 
@@ -453,7 +454,7 @@ def test_validation_config_loader_resolves_relative_paths(tmp_path):
 def test_workflow_end_to_end_pipeline_validation_report_and_benchmark(tmp_path):
     from src.workflow import WorkflowRunner
 
-    pipeline_cfg = _write_pipeline_run_config(tmp_path / "pipeline.json", URDF_1DOF)
+    pipeline_cfg = _write_pipeline_run_config(tmp_path / "pipeline.json", URDF_PENDULUM)
     workflow_cfg = _write_json(
         tmp_path / "workflow.json",
         {
@@ -566,3 +567,63 @@ def test_auto_from_pipeline_friction_warning_injects_workflow_notes(tmp_path, mo
     wf_notes = context["validation_cfg"].get("_workflow_notes", [])
     assert len(wf_notes) >= 1
     assert "friction" in wf_notes[0].lower()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    importlib.util.find_spec("pybullet") is None,
+    reason="pybullet is required for elbow workflow validation",
+)
+def test_elbow_workflow_end_to_end(tmp_path):
+    from src.workflow import WorkflowRunner
+
+    pipeline_cfg = _write_json(
+        tmp_path / "elbow_pipeline.json",
+        {
+            "urdf_path": str(URDF_ELBOW),
+            "output_dir": str(tmp_path / "elbow_workflow" / "pipeline"),
+            "method": "newton_euler",
+            "joint_limits": {
+                "position": [[-3.14159, 3.14159], [-1.5708, 1.5708], [-1.5708, 1.5708]],
+                "velocity": [[-3.0, 3.0], [-3.0, 3.0], [-3.0, 3.0]],
+                "acceleration": [[-8.0, 8.0], [-8.0, 8.0], [-8.0, 8.0]],
+            },
+            "excitation": {
+                "num_harmonics": 5,
+                "base_frequency_hz": 0.5,
+                "trajectory_duration_periods": 10,
+                "optimize_condition_number": True,
+                "optimizer_max_iter": 2000,
+            },
+            "identification": {
+                "solver": "ols",
+                "feasibility_method": "cholesky",
+            },
+        },
+    )
+    workflow_cfg = _write_json(
+        tmp_path / "elbow_workflow.json",
+        {
+            "run_pipeline": True,
+            "run_validation": True,
+            "run_report": False,
+            "run_benchmark": False,
+            "allow_missing_optional_dependencies": True,
+            "output_root": str(tmp_path / "elbow_workflow"),
+            "pipeline": {
+                "config_path": str(pipeline_cfg),
+            },
+            "validation": {
+                "auto_from_pipeline": True,
+                "comparison": {
+                    "tolerance_abs": 0.01,
+                    "tolerance_normalized_rms": 0.2,
+                },
+            },
+        },
+    )
+
+    results = WorkflowRunner(str(workflow_cfg)).run()
+
+    assert (Path(results["pipeline_output_dir"]) / "identification_results.npz").exists()
+    assert results["validation_summary"]["passed"] is True

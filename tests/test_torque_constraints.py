@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT))
 
 ASSET_DIR = ROOT / "tests" / "assets"
 URDF_RRBOT = str(ASSET_DIR / "RRBot_single.urdf")
-URDF_1DOF = str(ASSET_DIR / "SC_1DoF.urdf")
-URDF_3DOF = str(ASSET_DIR / "SC_3DoF.urdf")
+URDF_PENDULUM = str(ASSET_DIR / "DrakePendulum_1DoF.urdf")
+URDF_FINGEREDU = str(ASSET_DIR / "FingerEdu_3DoF.xacro")
 
 
 def _write_torque_config(tmp_path,
@@ -191,7 +191,7 @@ def test_torque_limit_precedence_urdf_over_json_then_json_fallback_then_error(tm
     np.testing.assert_allclose(tau_lim, [[-12.0, 12.0]])
     assert sources == ["urdf_effort"]
 
-    robot_no_effort = parse_urdf(URDF_1DOF)
+    robot_no_effort = parse_urdf(URDF_PENDULUM)
     tau_lim, sources = extract_torque_limits(
         robot_no_effort, {"torque": [[-15.0, 15.0]]}, logger=_logger, required=True,
     )
