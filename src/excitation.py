@@ -117,7 +117,7 @@ def preflight_excitation_config(cfg_exc, q_lim, dq_lim, ddq_lim, logger_=None):
     tf = n_periods / f0
     bounds = param_bounds(
         n_dof, m, basis, opt_phase, q_lim,
-        freqs=freqs, dq_lim=dq_lim, ddq_lim=ddq_lim,
+        freqs=freqs, dq_lim=dq_lim, ddq_lim=ddq_lim, tf=tf,
     )
     usable_fraction = _validate_sine_basis_feasibility(
         bounds, basis, n_dof, m, freqs, q_lim, dq_lim, tf, logger_,
@@ -143,10 +143,21 @@ def _build_literature_initial_guess(bounds, basis, opt_phase, nDoF, m, freqs,
         for i in range(nDoF):
             a_slice = bounds[i * 2 * m: i * 2 * m + m]
             b_slice = bounds[i * 2 * m + m: i * 2 * m + 2 * m]
-            for _, hi in a_slice:
-                x0_list.append(hi * a_scale * (1.0 + 0.05 * rng.standard_normal()))
-            for _, hi in b_slice:
-                x0_list.append(hi * 0.001 * (1.0 + 0.05 * rng.standard_normal()))
+            # Alternate signs across harmonics so that the lam0 = -sum(a_j)
+            # contributions partially cancel, reducing baseline offset
+            # bias.  This is a heuristic that gives the optimizer a better
+            # starting point; the first harmonic still dominates so the
+            # initial trajectory may remain somewhat one-sided.
+            for j, (_, hi) in enumerate(a_slice):
+                sign = 1.0 if j % 2 == 0 else -1.0
+                x0_list.append(sign * hi * a_scale * (1.0 + 0.05 * rng.standard_normal()))
+            # Use the same a_scale for sine amplitudes (instead of the
+            # previous 0.001) since the bounds are now correctly
+            # tightened for the secular drift (Fix 1).  Alternate signs
+            # for richer initial velocity profiles.
+            for j, (_, hi) in enumerate(b_slice):
+                sign = 1.0 if j % 2 == 0 else -1.0
+                x0_list.append(sign * hi * a_scale * (1.0 + 0.05 * rng.standard_normal()))
         x0 = np.array(x0_list)
     elif basis == "sine":
         x0_list = []
@@ -211,7 +222,7 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
     n_params = param_count(nDoF, m, basis, opt_phase)
     bounds = param_bounds(
         nDoF, m, basis, opt_phase, q_lim,
-        freqs=freqs, dq_lim=dq_lim, ddq_lim=ddq_lim,
+        freqs=freqs, dq_lim=dq_lim, ddq_lim=ddq_lim, tf=tf,
     )
     _validate_sine_basis_feasibility(
         bounds, basis, nDoF, m, freqs, q_lim, dq_lim, tf, logger,
@@ -255,9 +266,17 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
         q, dq, ddq_v = fourier_trajectory(x, freqs, t, q0, basis, opt_phase)
         if opt_cond:
             if base_kept_cols is not None:
-                c = _condition_cost_base_fast(q, dq, ddq_v, t, get_regressor, base_kept_cols)
+                c_raw = _condition_cost_base_fast(q, dq, ddq_v, t, get_regressor, base_kept_cols)
             else:
-                c = _condition_cost_base(q, dq, ddq_v, t, get_regressor)
+                c_raw = _condition_cost_base(q, dq, ddq_v, t, get_regressor)
+            # Use log10(cond) instead of raw cond to avoid gradient scale
+            # mismatch with constraint gradients.  The raw condition number
+            # can be O(10^4-10^5) at small amplitudes, producing gradients
+            # of O(10^8) vs constraint gradients of O(10^2).  log10 is
+            # monotone so the optimum is unchanged, but the gradient is
+            # reduced by a factor of ~cond*ln(10), matching constraint
+            # scales and preventing SLSQP QP infeasibility.
+            c = np.log10(max(c_raw, 1.0))
         else:
             c = _amplitude_cost(dq, ddq_v)
 

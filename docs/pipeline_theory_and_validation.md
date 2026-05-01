@@ -519,13 +519,35 @@ $$
 where $\dot q_{i,\max}^{\mathrm{sym}}$ and
 $\ddot q_{i,\max}^{\mathrm{sym}}$ are the smaller-magnitude sides of the
 implemented symmetric velocity and acceleration limits. The same per-harmonic
-cap is used for cosine amplitudes, sine amplitudes, and phase-optimized
-amplitudes.
+cap is used for cosine amplitudes and phase-optimized amplitudes.
 
-This is an implementation choice rather than a textbook identity, but it is
-important for the current SLSQP path: high harmonics can otherwise start from an
-initial guess whose acceleration already violates the constraints by large
-margins, making the feasible set numerically hard to reach.
+For `basis="both"` with `optimize_phase=false`, the sine amplitudes use a
+tighter bound that also accounts for the secular drift term
+$\lambda_{1,i} t = -2\pi \sum_j b_{ij} f_j \, t$. Because the position
+contribution of sine harmonic $j$ is $b_{ij}[\sin(\omega_j t) - \omega_j t]$,
+the non-periodic drift grows linearly with time.  At $t = t_f$ the drift
+magnitude is $\omega_j t_f |b_{ij}|$, which must not exceed
+$(q_{i,\max} - q_{i,\min})/2$ for the position constraint to remain feasible.
+The per-harmonic sine amplitude bound is therefore
+
+$$
+\bar b_{ij} =
+\min\!\left(
+\bar a_{ij},\;
+\frac{q_{i,\max} - q_{i,\min}}{2\,\omega_j\,t_f}
+\right),
+$$
+
+where $\bar a_{ij}$ is the standard velocity/acceleration-tightened bound
+defined above. This is a conservative per-harmonic search-box restriction: the
+actual drift is coupled through $\lambda_1 = -\sum_j \omega_j b_j$, so multiple
+coefficients can combine into aggregate drift that exceeds any single
+per-coefficient bound. The linear trajectory constraints (which check the
+total position at every grid point) remain the authoritative feasibility
+guarantee; the tightened bounds serve as a preconditioning step that shrinks the
+search box toward the feasible region, improving SLSQP convergence. For short
+trajectories the drift term is non-binding, but for long horizons (large $t_f$)
+it can dominate and shrink the feasible sine amplitudes significantly.
 
 For `basis="sine"`, the drift correction term $\lambda_{1,i}$ also creates a
 duration-dependent amplitude cap. The code enforces
@@ -574,6 +596,49 @@ $$
 $$
 
 minimizing $\kappa_2(W)$ is monotonic-equivalent to minimizing $\kappa_2(W^\top W)$ whenever $W$ has nonzero singular values. This is the basis of the code's `_condition_cost_base()` implementation. See Gautier and Khalil (1992) and Swevers et al. (1997).
+
+The optimizer minimizes $\log_{10}(\kappa_2)$ rather than the raw condition
+number. This is a monotone transformation that preserves the minimizer for the
+pure conditioning objective but compresses the gradient scale. The raw condition
+number can reach $O(10^8)$ or higher, producing cost gradients that are
+$O(10^6)$ times larger than the constraint gradients (which are $O(10^2)$ for
+typical joint-space bounds). This scale mismatch can cause SLSQP's internal QP
+subproblem to declare infeasibility. The $\log_{10}$ transformation brings the
+cost and constraint gradients into comparable magnitudes, which is critical for
+reliable SLSQP convergence.
+
+When `torque_constraint_method="soft_penalty"` is active, the total objective
+becomes $\log_{10}(\kappa_2) + w \cdot P_{\text{soft}}$, a scalarized
+multi-objective that trades conditioning against torque-limit compliance. The
+$\log_{10}$ transformation changes the relative weighting between the
+conditioning and penalty terms compared to what a raw-$\kappa_2$ formulation
+would produce. Users who need precise control over the conditioning-vs-penalty
+tradeoff should adjust `soft_penalty_weight` accordingly.
+
+### Governing equations: initial guess construction
+
+The literature-standard initial guess for `basis="both"` with
+`optimize_phase=false` sets each amplitude to a fraction of its upper bound.
+The cosine amplitudes alternate in sign across harmonics:
+
+$$
+a_{ij}^{(0)} = (-1)^{j}\, s \, \bar a_{ij} \, (1 + \epsilon_{ij}),
+$$
+
+where $s = 0.5/m$ is the scale factor, $\bar a_{ij}$ is the per-harmonic upper
+bound, and $\epsilon_{ij} \sim \mathcal{N}(0, 0.05^2)$ is a small random
+perturbation to break symmetry. The same alternating-sign pattern and scale
+factor are used for the sine amplitudes $b_{ij}^{(0)}$.
+
+The sign alternation is a heuristic that reduces $\lambda_0$ bias. The cosine
+basis includes the correction $\lambda_{0,i} = -\sum_j a_{ij}$. If all cosine
+amplitudes share the same sign, $\lambda_0$ shifts the trajectory baseline far
+from $q_0$, producing a one-sided initial guess that wastes half the available
+joint range. Alternating signs make the $\lambda_0$ contributions partially
+cancel, reducing but not eliminating the offset (since the first harmonic still
+dominates in amplitude). This gives the optimizer a better starting point but
+does not guarantee a symmetric trajectory — the final symmetry depends on the
+optimized amplitudes, not the initial guess.
 
 When condition-number optimization is disabled, the current code uses the fallback amplitude objective
 

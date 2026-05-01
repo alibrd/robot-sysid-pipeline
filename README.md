@@ -121,7 +121,8 @@ torque limits with this precedence:
 4. **Regressor setup** -- Newton-Euler (numeric recursive) or Euler-Lagrange
    (symbolic, cached as SymPy, re-lambdified on load)
 5. **Excitation design** -- Fourier trajectory optimisation with the
-   literature-standard SLSQP formulation. It enforces joint-space limits and
+   literature-standard SLSQP formulation (log₁₀ condition number cost). It
+   enforces joint-space limits with drift-aware sine amplitude bounds and
    can additionally apply torque-limited excitation. Cartesian/workspace
    constraints are not implemented
 6. **Data generation** -- synthetic from regressor or load external `.npz`
@@ -363,8 +364,8 @@ The documentation-linked verification layer lives in:
 | `kinematics.py` | Per-joint symbolic transforms, Jacobians; full-chain PI vector |
 | `dynamics_newton_euler.py` | Numeric NE recursive regressor `Y(q, dq, ddq)` |
 | `dynamics_euler_lagrange.py` | Symbolic EL regressor via the Lagrangian (cached to pickle) |
-| `trajectory.py` | Fourier-basis trajectory generation with lambda correction terms |
-| `excitation.py` | Trajectory parameter optimisation, preflight checks, and SLSQP/DE dispatch |
+| `trajectory.py` | Fourier-basis trajectory generation with lambda correction terms and drift-aware sine bounds |
+| `excitation.py` | Trajectory parameter optimisation (log₁₀ condition number), preflight checks, and SLSQP dispatch |
 | `torque_constraints.py` | Torque-limit design helpers, replay validation, and torque summaries |
 | `observation_matrix.py` | Stack per-sample regressors into the observation matrix |
 | `base_parameters.py` | QR-based column-pivoted reduction to identifiable parameters |

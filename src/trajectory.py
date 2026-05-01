@@ -128,7 +128,8 @@ def param_count(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool)
 
 def param_bounds(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool,
                  q_lim: np.ndarray, freqs: np.ndarray = None,
-                 dq_lim: np.ndarray = None, ddq_lim: np.ndarray = None):
+                 dq_lim: np.ndarray = None, ddq_lim: np.ndarray = None,
+                 tf: float = None):
     """Bounds for trajectory optimisation variables.
 
     When ``freqs``, ``dq_lim``, and ``ddq_lim`` are provided the per-harmonic
@@ -136,6 +137,12 @@ def param_bounds(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool
     cannot alone exceed the velocity or acceleration limits.  This shrinks the
     search space to a region where feasibility is achievable, which is critical
     for gradient-based optimisers such as SLSQP.
+
+    When ``tf`` is provided and ``basis="both"`` with ``optimize_phase=False``,
+    the sine-amplitude bounds are further tightened to account for the secular
+    drift term ``-2*pi*f_j*t*b_ij`` that accumulates over the trajectory
+    duration.  Without this, the search box extends far into the position-
+    infeasible region, causing SLSQP's QP subproblem to fail.
     """
     m = num_harmonics
     bounds = []
@@ -152,6 +159,21 @@ def param_bounds(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool
                 amp = min(amp, ddq_max / omega ** 2)
         return amp
 
+    def _sine_amp_bound(i, j):
+        """Per-harmonic sine amplitude bound including secular drift."""
+        amp = _amp_bound(i, j)
+        # For basis="both" with optimize_phase=False, the sine contribution
+        # to position is b_ij * [sin(2*pi*f_j*t) - 2*pi*f_j*t].  The term
+        # -2*pi*f_j*t is a secular (non-periodic) drift that grows linearly.
+        # At t=tf the drift magnitude is 2*pi*f_j*tf*|b_ij|, which must not
+        # exceed q_range/2 for the position constraint to remain feasible.
+        if freqs is not None and tf is not None and tf > 0:
+            q_half_range = (q_lim[i, 1] - q_lim[i, 0]) / 2.0
+            omega = 2.0 * np.pi * freqs[j]
+            drift_bound = q_half_range / (omega * tf)
+            amp = min(amp, drift_bound)
+        return amp
+
     if basis == "cosine" or basis == "sine":
         for i in range(nDoF):
             for j in range(m):
@@ -163,7 +185,7 @@ def param_bounds(nDoF: int, num_harmonics: int, basis: str, optimize_phase: bool
                 a = _amp_bound(i, j)
                 bounds.append((-a, a))
             for j in range(m):          # sine amplitudes
-                a = _amp_bound(i, j)
+                a = _sine_amp_bound(i, j)
                 bounds.append((-a, a))
     elif basis == "both" and optimize_phase:
         for i in range(nDoF):
