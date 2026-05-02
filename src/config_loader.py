@@ -46,7 +46,8 @@ def load_config_dict(user_cfg: dict,
     resolution.
     """
     defaults = load_default_config()
-    cfg = deep_merge(defaults, deepcopy(user_cfg))
+    user_cfg = _normalize_pipeline_mode_fields(user_cfg)
+    cfg = deep_merge(defaults, user_cfg)
     cfg = _strip_deprecated_excitation_keys(cfg)
     cfg = _resolve_paths(cfg, resolve_relative_to)
     if validate:
@@ -64,6 +65,10 @@ def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
     resolved["urdf_path"] = resolve_path_value(resolved.get("urdf_path"), base_dir)
     resolved["output_dir"] = resolve_path_value(resolved.get("output_dir"), base_dir)
 
+    resolved["checkpoint_dir"] = resolve_path_value(
+        resolved.get("checkpoint_dir"), base_dir
+    )
+
     identification = resolved.get("identification", {})
     identification["data_file"] = resolve_path_value(
         identification.get("data_file"),
@@ -71,6 +76,19 @@ def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
     )
     resolved["identification"] = identification
     return resolved
+
+
+def _normalize_pipeline_mode_fields(user_cfg: dict) -> dict:
+    """Accept workflow-style nested pipeline mode fields in pipeline configs."""
+    normalized = deepcopy(user_cfg)
+    pipeline_section = normalized.get("pipeline")
+    if not isinstance(pipeline_section, dict):
+        return normalized
+
+    for key in ("excitation_only", "checkpoint_dir"):
+        if key not in normalized and key in pipeline_section:
+            normalized[key] = pipeline_section[key]
+    return normalized
 
 
 def _strip_deprecated_excitation_keys(cfg: dict) -> dict:
@@ -205,4 +223,13 @@ def _validate(cfg: dict, path: str):
             "produces a reduced parameter vector that cannot be mapped to "
             "per-link pseudo-inertia constraints. Use method='newton_euler' "
             "for constrained identification, or set feasibility_method='none'."
+        )
+
+    # Pipeline partitioning: excitation_only and checkpoint_dir are mutually
+    # exclusive run modes.
+    if cfg.get("excitation_only") and cfg.get("checkpoint_dir"):
+        raise ValueError(
+            "'excitation_only' and 'checkpoint_dir' are mutually exclusive. "
+            "Set excitation_only=true to stop after Stage 6, or set "
+            "checkpoint_dir to resume from a previous run, but not both."
         )

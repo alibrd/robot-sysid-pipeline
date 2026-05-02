@@ -205,6 +205,94 @@ def test_auto_from_pipeline_populates_validation_inputs(tmp_path, monkeypatch):
     assert context["validation_cfg"]["sample_rate_hz"] == 120.0
 
 
+def test_auto_from_pipeline_uses_checkpoint_excitation_metadata(tmp_path, monkeypatch):
+    from src.workflow import WorkflowRunner
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    _write_json(
+        checkpoint_dir / "checkpoint_config.json",
+        {
+            "excitation": {
+                "base_frequency_hz": 0.1,
+                "trajectory_duration_periods": 30,
+            },
+        },
+    )
+    np.savez(str(checkpoint_dir / "checkpoint.npz"), exc_freqs=np.asarray([0.1, 0.2]))
+
+    pipeline_cfg = _write_json(
+        tmp_path / "pipeline.json",
+        {
+            "urdf_path": str(URDF_RRBOT),
+            "output_dir": "pipeline_out",
+            "method": "newton_euler",
+            "checkpoint_dir": str(checkpoint_dir),
+        },
+    )
+    workflow_cfg = _write_json(
+        tmp_path / "workflow.json",
+        {
+            "run_pipeline": True,
+            "run_validation": True,
+            "run_report": False,
+            "run_benchmark": False,
+            "pipeline": {"config_path": str(pipeline_cfg)},
+            "validation": {"auto_from_pipeline": True},
+        },
+    )
+
+    monkeypatch.setattr("src.workflow._is_module_available", lambda name: True)
+
+    context = WorkflowRunner(str(workflow_cfg)).prepare()
+
+    assert context["validation_cfg"]["base_frequency_hz"] == 0.1
+    assert context["validation_cfg"]["trajectory_duration_periods"] == 30
+
+
+def test_auto_from_pipeline_rejects_mismatched_checkpoint_metadata(tmp_path, monkeypatch):
+    from src.workflow import WorkflowRunner
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    _write_json(
+        checkpoint_dir / "checkpoint_config.json",
+        {
+            "excitation": {
+                "base_frequency_hz": 0.1,
+                "trajectory_duration_periods": 30,
+            },
+        },
+    )
+    np.savez(str(checkpoint_dir / "checkpoint.npz"), exc_freqs=np.asarray([0.2, 0.4]))
+
+    pipeline_cfg = _write_json(
+        tmp_path / "pipeline.json",
+        {
+            "urdf_path": str(URDF_RRBOT),
+            "output_dir": "pipeline_out",
+            "method": "newton_euler",
+            "checkpoint_dir": str(checkpoint_dir),
+        },
+    )
+    workflow_cfg = _write_json(
+        tmp_path / "workflow.json",
+        {
+            "run_pipeline": True,
+            "run_validation": True,
+            "run_report": False,
+            "run_benchmark": False,
+            "pipeline": {"config_path": str(pipeline_cfg)},
+            "validation": {"auto_from_pipeline": True},
+        },
+    )
+
+    monkeypatch.setattr("src.workflow._is_module_available", lambda name: True)
+
+    with pytest.raises(ValueError, match="Validation excitation metadata"):
+        WorkflowRunner(str(workflow_cfg)).prepare()
+
+
 def test_validation_without_pipeline_missing_excitation_fails_preflight(tmp_path, monkeypatch):
     from src.workflow import WorkflowRunner
 

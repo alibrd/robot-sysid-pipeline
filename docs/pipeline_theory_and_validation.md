@@ -599,11 +599,7 @@ minimizing $\kappa_2(W)$ is monotonic-equivalent to minimizing $\kappa_2(W^\top 
 
 The optimizer minimizes $\log_{10}(\kappa_2)$ rather than the raw condition
 number. This is a monotone transformation that preserves the minimizer for the
-pure conditioning objective but compresses the gradient scale. The raw condition
-number can reach $O(10^8)$ or higher, producing cost gradients that are
-$O(10^6)$ times larger than the constraint gradients (which are $O(10^2)$ for
-typical joint-space bounds). This scale mismatch can cause SLSQP's internal QP
-subproblem to declare infeasibility. The $\log_{10}$ transformation brings the
+pure conditioning objective but compresses the gradient scale. The $\log_{10}$ transformation brings the
 cost and constraint gradients into comparable magnitudes, which is critical for
 reliable SLSQP convergence.
 

@@ -5,6 +5,8 @@ import warnings
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
+
 from .config_loader import load_config
 from .config_utils import deep_merge, resolve_path_value
 from .pipeline import SystemIdentificationPipeline
@@ -16,6 +18,7 @@ from .pybullet_validation import (
 )
 from .pybullet_validation_benchmark import export_validation_benchmark
 from .pybullet_validation_report import export_validation_report
+from .trajectory import build_frequencies
 
 
 def load_default_workflow_config() -> dict:
@@ -83,6 +86,10 @@ class WorkflowRunner:
                     "or validation.auto_from_pipeline=true."
                 )
             pipeline_cfg = load_config(pipeline_config_path)
+            if pipeline_ref.get("excitation_only"):
+                pipeline_cfg["excitation_only"] = True
+            if pipeline_ref.get("checkpoint_dir"):
+                pipeline_cfg["checkpoint_dir"] = pipeline_ref["checkpoint_dir"]
             if output_root_path is not None:
                 pipeline_cfg["output_dir"] = str(
                     output_root_path / "pipeline" / Path(pipeline_config_path).stem
@@ -114,9 +121,14 @@ class WorkflowRunner:
                 validation_cfg["excitation_file"] = str(
                     pipeline_output_dir / "excitation_trajectory.npz"
                 )
-                validation_cfg["base_frequency_hz"] = pipeline_cfg["excitation"]["base_frequency_hz"]
+                excitation_meta = _pipeline_validation_excitation_metadata(
+                    pipeline_cfg
+                )
+                validation_cfg["base_frequency_hz"] = (
+                    excitation_meta["base_frequency_hz"]
+                )
                 validation_cfg["trajectory_duration_periods"] = (
-                    pipeline_cfg["excitation"].get("trajectory_duration_periods", 1)
+                    excitation_meta["trajectory_duration_periods"]
                 )
                 friction_model = pipeline_cfg.get("friction", {}).get("model", "none")
                 if friction_model != "none":
@@ -216,6 +228,7 @@ class WorkflowRunner:
             "run_validation": run_validation,
             "run_report": run_report,
             "run_benchmark": run_benchmark,
+            "auto_from_pipeline": auto_from_pipeline,
             "pipeline_cfg": pipeline_cfg,
             "validation_cfg": validation_cfg,
             "report_validation_dir": report_validation_dir,
@@ -231,9 +244,22 @@ class WorkflowRunner:
 
         pipeline_runner = None
         if ctx["run_pipeline"]:
-            pipeline_runner = SystemIdentificationPipeline(ctx["pipeline_cfg"])
+            pipeline_cfg = ctx["pipeline_cfg"]
+            # Inject workflow-level pipeline partitioning overrides
+            pipeline_section = self.cfg.get("pipeline", {})
+            if pipeline_section.get("excitation_only"):
+                pipeline_cfg["excitation_only"] = True
+            cp_dir = pipeline_section.get("checkpoint_dir")
+            if cp_dir:
+                pipeline_cfg["checkpoint_dir"] = cp_dir
+            pipeline_runner = SystemIdentificationPipeline(pipeline_cfg)
             pipeline_runner.run()
             results["pipeline_output_dir"] = str(pipeline_runner.output_dir)
+            if ctx["run_validation"] and ctx["auto_from_pipeline"]:
+                _check_excitation_artifact_frequencies(
+                    Path(ctx["validation_cfg"]["excitation_file"]),
+                    ctx["validation_cfg"]["base_frequency_hz"],
+                )
 
         validation_runner = None
         if ctx["run_validation"]:
@@ -269,6 +295,57 @@ def _extract_inline_validation_fields(validation_cfg: dict) -> dict:
         for key, value in validation_cfg.items()
         if key not in reserved
     }
+
+
+def _pipeline_validation_excitation_metadata(pipeline_cfg: dict) -> dict:
+    """Return excitation metadata matching the generated validation artifact."""
+    excitation = deepcopy(pipeline_cfg["excitation"])
+    checkpoint_dir = pipeline_cfg.get("checkpoint_dir")
+    if checkpoint_dir:
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_config_path = checkpoint_dir / "checkpoint_config.json"
+        if checkpoint_config_path.exists():
+            with open(checkpoint_config_path, "r", encoding="utf-8-sig") as f:
+                checkpoint_cfg = json.load(f)
+            checkpoint_excitation = checkpoint_cfg.get("excitation", {})
+            if isinstance(checkpoint_excitation, dict):
+                excitation = deep_merge(excitation, checkpoint_excitation)
+
+        checkpoint_path = checkpoint_dir / "checkpoint.npz"
+        if checkpoint_path.exists():
+            _check_excitation_artifact_frequencies(
+                checkpoint_path,
+                excitation["base_frequency_hz"],
+                frequency_key="exc_freqs",
+            )
+
+    return {
+        "base_frequency_hz": excitation["base_frequency_hz"],
+        "trajectory_duration_periods": excitation.get(
+            "trajectory_duration_periods", 1
+        ),
+    }
+
+
+def _check_excitation_artifact_frequencies(path: Path,
+                                           base_frequency_hz: float,
+                                           frequency_key: str = "freqs") -> None:
+    """Reject validation metadata that cannot replay the excitation artifact."""
+    if not path.exists():
+        return
+
+    with np.load(str(path), allow_pickle=True) as artifact:
+        if frequency_key not in artifact.files:
+            return
+        freqs = artifact[frequency_key]
+
+    expected_freqs = build_frequencies(float(base_frequency_hz), freqs.size)
+    if not np.allclose(freqs, expected_freqs, atol=1e-12):
+        raise ValueError(
+            "Validation excitation metadata does not match the excitation artifact. "
+            f"Using base_frequency_hz={base_frequency_hz} expects "
+            f"{expected_freqs.tolist()}, but {path} contains {freqs.tolist()}."
+        )
 
 
 def _check_validation_consistency(*,
@@ -310,7 +387,7 @@ def _resolve_workflow_paths(cfg: dict, base_dir: Path) -> dict:
     resolved["output_root"] = resolve_path_value(resolved.get("output_root"), base_dir)
 
     for section_name, keys in {
-        "pipeline": ("config_path",),
+        "pipeline": ("config_path", "checkpoint_dir"),
         "validation": ("config_path", "urdf_path", "excitation_file", "output_dir"),
         "report": ("validation_dir",),
         "benchmark": ("validation_root",),

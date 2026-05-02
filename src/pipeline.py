@@ -46,10 +46,17 @@ class SystemIdentificationPipeline:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = setup_logger(str(self.output_dir))
 
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
     def run(self):
         t0 = time.time()
         log = self.logger
         cfg = self.cfg
+
+        excitation_only = cfg.get("excitation_only", False)
+        checkpoint_dir = cfg.get("checkpoint_dir")
 
         try:
             log.info("=" * 60)
@@ -59,432 +66,36 @@ class SystemIdentificationPipeline:
                      cfg["method"], cfg["friction"]["model"],
                      cfg["identification"]["solver"])
 
-            log.info("-- Stage 1: Parsing URDF --")
-            robot = parse_urdf(cfg["urdf_path"])
-            log.info("Robot: '%s', %d DoF, revolute joints: %s",
-                     robot.name, robot.nDoF, robot.revolute_joint_names)
+            if checkpoint_dir:
+                # Resume mode
+                log.info("Mode: RESUME FROM CHECKPOINT (%s)", checkpoint_dir)
+                cp_path = Path(checkpoint_dir)
+                log.info("Loading checkpoint from %s", cp_path)
+                cp_data = self._load_checkpoint(cp_path)
 
-            log.info("-- Stage 2: Extracting joint limits --")
-            q_lim, dq_lim, ddq_lim = extract_joint_limits(
-                robot, cfg["joint_limits"], log
-            )
-            torque_method = cfg["excitation"].get("torque_constraint_method", "none")
-            torque_required = torque_method != "none"
-            tau_lim, torque_limit_sources = extract_torque_limits(
-                robot, cfg["joint_limits"], log, required=torque_required
-            )
-            log.info("-- Preflight: Checking excitation feasibility --")
-            preflight_excitation_config(
-                cfg["excitation"], q_lim, dq_lim, ddq_lim, log,
-            )
+                ctx = self._run_stages_1_to_4()
+                ctx.update(cp_data)
+                log.info("Resuming from checkpoint (skipping Stages 5-6)")
+                log.info("Excitation cost (from checkpoint): %.6f",
+                         ctx["exc_result"]["cost"])
+                self._run_stages_7_to_11(ctx)
 
-            log.info("-- Stage 3: Building kinematics --")
-            kin = RobotKinematics(robot, log)
-            log.info("Initial parameter vector (10n=%d): %s",
-                     len(kin.PI), kin.PI.flatten()[:6].tolist())
+            elif excitation_only:
+                # Excitation-only mode
+                log.info("Mode: EXCITATION ONLY (will stop after Stage 6)")
+                ctx = self._run_stages_1_to_4()
+                self._run_stage_5(ctx)
+                self._run_stage_6(ctx)
+                self._save_excitation_trajectory(ctx)
+                self._save_checkpoint(ctx)
+                log.info("Pipeline stopped after excitation (checkpoint saved).")
 
-            log.info("-- Stage 4: Setting up regressor (%s) --", cfg["method"])
-            el_regressor_fn = None
-            el_kept_cols = None
-            if cfg["method"] == "newton_euler":
-                def regressor_fn(q, dq, ddq):
-                    return newton_euler_regressor(kin, q, dq, ddq)
             else:
-                cache_dir = str(self.output_dir / "el_cache")
-                el_regressor_fn, el_kept_cols = euler_lagrange_regressor_builder(
-                    kin, cache_dir
-                )
-                regressor_fn = el_regressor_fn
-                log.info("EL regressor: %d kept columns.", len(el_kept_cols))
-
-            augmented_regressor_fn = make_augmented_regressor(
-                regressor_fn, cfg["friction"]["model"]
-            )
-
-            def _rigid_nominal_vector():
-                if cfg["method"] == "euler_lagrange" and el_kept_cols is not None:
-                    return kin.PI.flatten()[el_kept_cols]
-                return kin.PI.flatten()
-
-            def _nominal_parameter_vector(seed_vector=None):
-                rigid = _rigid_nominal_vector() if seed_vector is None else np.asarray(seed_vector, dtype=float)
-                return build_nominal_parameter_vector(
-                    rigid,
-                    kin.nDoF,
-                    cfg["friction"]["model"],
-                )
-
-            def _excitation_time_series(exc_result):
-                freqs = exc_result["freqs"]
-                q0 = exc_result["q0"]
-                basis = exc_result["basis"]
-                opt_phase = exc_result["optimize_phase"]
-                params = exc_result["params"]
-
-                f0 = cfg["excitation"]["base_frequency_hz"]
-                tf = cfg["excitation"].get("trajectory_duration_periods", 1) / f0
-                data_fs = 2.0 * freqs[-1] * 10
-                t_data = np.arange(0.0, tf, 1.0 / data_fs)
-                q_data_t, dq_data_t, ddq_data_t = fourier_trajectory(
-                    params, freqs, t_data, q0, basis, opt_phase
-                )
-                return t_data, q_data_t.T, dq_data_t.T, ddq_data_t.T, data_fs
-
-            true_nominal_params = _nominal_parameter_vector()
-
-            def _load_or_generate_data(exc_result):
-                data_file = cfg["identification"].get("data_file")
-                if data_file:
-                    log.info("Loading external data from %s", data_file)
-                    data = np.load(data_file)
-                    q_data = data["q"]
-                    dq_data = data["dq"]
-                    ddq_data = data["ddq"]
-                    tau_data = data["tau"]
-                    data_fs = float(data.get("fs", 1e4))
-                    return q_data, dq_data, ddq_data, tau_data, data_fs
-
-                log.info("Generating synthetic trajectory from excitation parameters.")
-                _, q_data, dq_data, ddq_data, data_fs = _excitation_time_series(exc_result)
-                N = q_data.shape[0]
-                tau_data = np.zeros((N, kin.nDoF))
-                for k in range(N):
-                    tau_data[k] = augmented_regressor_fn(
-                        q_data[k], dq_data[k], ddq_data[k]
-                    ) @ true_nominal_params
-                log.info("Generated %d data samples at %.1f Hz", N, data_fs)
-                return q_data, dq_data, ddq_data, tau_data, data_fs
-
-            def _solve_identification_pass(q_data, dq_data, ddq_data, tau_data, data_fs):
-                log.info("-- Stage 7: Building observation matrix --")
-                W, tau_vec = build_observation_matrix(
-                    q_data, dq_data, ddq_data, tau_data,
-                    regressor_fn, cfg, data_fs
-                )
-                log.info("W shape: %s", W.shape)
-
-                log.info("-- Stage 8: Base parameter reduction --")
-                pi_full = _nominal_parameter_vector()
-                W_base, P_mat, kept_cols, rank, pi_base = compute_base_parameters(W, pi_full)
-                log.info("Base parameters: %d (from %d full)", rank, len(pi_full))
-
-                log.info("-- Stage 9: Solving identification --")
-                solver = cfg["identification"]["solver"]
-                feas_method = cfg["identification"]["feasibility_method"]
-                bounds_opt = None
-                cfg_bounds = cfg["identification"].get("parameter_bounds")
-                if isinstance(cfg_bounds, list) and len(cfg_bounds) == 2:
-                    lb = np.array(cfg_bounds[0])
-                    ub = np.array(cfg_bounds[1])
-                    if len(lb) == rank and len(ub) == rank:
-                        bounds_opt = (lb, ub)
-                        if solver == "ols":
-                            solver = "bounded_ls"
-                            log.info("Switching to bounded_ls due to user parameter_bounds.")
-                elif cfg_bounds is True:
-                    lb = pi_base - np.abs(pi_base) * 0.5 - 1e-3
-                    ub = pi_base + np.abs(pi_base) * 0.5 + 1e-3
-                    bounds_opt = (lb, ub)
-                    if solver == "ols":
-                        solver = "bounded_ls"
-                        log.info("Switching to bounded_ls due to parameter_bounds=true")
-
-                pi_hat, residual, info = solve_identification(
-                    W_base, tau_vec, solver=solver, bounds=bounds_opt,
-                    nDoF=kin.nDoF, feasibility_method=feas_method,
-                    P_mat=P_mat if feas_method != "none" else None,
-                )
-                log.info("Identified %d parameters, residual=%.6e", len(pi_hat), residual)
-
-                if info.get("solved_in_full_space"):
-                    pi_identified_full = pi_hat
-                else:
-                    pi_identified_full = np.linalg.pinv(P_mat) @ pi_hat
-
-                recon_err = np.linalg.norm(
-                    W_base @ (P_mat @ pi_identified_full) - W_base @ pi_hat
-                    if not info.get("solved_in_full_space")
-                    else W_base @ P_mat @ pi_identified_full - tau_vec
-                )
-                log.debug("Reconstruction consistency: ||W_b*P*pi_recon - ref|| = %.3e",
-                          recon_err)
-
-                log.info("-- Stage 10: Feasibility check --")
-                report, feasible, pi_corrected = check_feasibility(
-                    pi_identified_full, kin.nDoF, method=feas_method
-                )
-                for r in report:
-                    if r["feasible"]:
-                        log.info("  Link %d: FEASIBLE (mass=%.4f)", r["link"], r["mass"])
-                    else:
-                        log.warning("  Link %d: INFEASIBLE -- %s",
-                                    r["link"], "; ".join(r["issues"]))
-
-                return {
-                    "W": W,
-                    "tau_vec": tau_vec,
-                    "W_base": W_base,
-                    "P_mat": P_mat,
-                    "kept_cols": kept_cols,
-                    "rank": rank,
-                    "pi_base": pi_hat if not info.get("solved_in_full_space") else P_mat @ pi_identified_full,
-                    "pi_identified_full": pi_identified_full,
-                    "pi_corrected": pi_corrected,
-                    "residual": residual,
-                    "report": report,
-                    "feasible": feasible,
-                    "info": info,
-                    "solver": solver,
-                    "n_fric": friction_param_count(kin.nDoF, cfg["friction"]["model"]),
-                }
-
-            def _validate_torque_models(exc_result, nominal_params_used, identified_params, corrected_params,
-                                        design_method):
-                if tau_lim is None:
-                    return None, None
-
-                t_dense = validation_time_vector(
-                    exc_result["freqs"],
-                    cfg["excitation"]["base_frequency_hz"],
-                    cfg["excitation"].get("trajectory_duration_periods", 1),
-                    cfg["excitation"].get("torque_validation_oversample_factor", 1),
-                )
-                q_dense, dq_dense, ddq_dense = fourier_trajectory(
-                    exc_result["params"],
-                    exc_result["freqs"],
-                    t_dense,
-                    exc_result["q0"],
-                    exc_result["basis"],
-                    exc_result["optimize_phase"],
-                )
-                replay = replay_torque_models(
-                    q_dense, dq_dense, ddq_dense, augmented_regressor_fn, tau_lim,
-                    "actuator_envelope" if design_method == "actuator_envelope" else "nominal_hard",
-                    cfg["excitation"].get("torque_constraint", {}),
-                    nominal_params=nominal_params_used,
-                    identified_params=identified_params,
-                    corrected_params=corrected_params,
-                )
-
-                design_summary = None
-                if design_method in {"nominal_hard", "robust_box", "chance", "actuator_envelope"}:
-                    design_data = compute_torque_design_data(
-                        q_dense, dq_dense, ddq_dense,
-                        augmented_regressor_fn,
-                        nominal_params_used,
-                        tau_lim,
-                        design_method,
-                        cfg["excitation"].get("torque_constraint", {}),
-                    )
-                    replay["design_lower"] = design_data["design_lower"]
-                    replay["design_upper"] = design_data["design_upper"]
-                    replay["design_upper_margin"] = design_data["design_upper_margin"]
-                    replay["design_lower_margin"] = design_data["design_lower_margin"]
-                    replay["design_pass"] = np.array(design_data["design_pass"])
-                    if design_data["quantile"] is not None:
-                        replay["chance_quantile"] = np.array(design_data["quantile"])
-                    design_summary = {
-                        "design_pass": bool(design_data["design_pass"]),
-                        "quantile": None if design_data["quantile"] is None else float(design_data["quantile"]),
-                    }
-
-                worst_source = replay.get("identified_summary", replay.get("nominal_summary"))
-                worst_joint = None
-                worst_time_s = None
-                if worst_source is not None:
-                    worst_joint = int(worst_source["worst_joint"])
-                    worst_time_s = float(t_dense[worst_source["worst_time_index"]])
-
-                summary = {
-                    "torque_constraint_method": cfg["excitation"].get("torque_constraint_method", "none"),
-                    "torque_limit_source": torque_limit_sources,
-                    "torque_nominal_pass": bool(replay["nominal_summary"]["pass"]) if "nominal_summary" in replay else None,
-                    "torque_identified_pass": bool(replay["identified_summary"]["pass"]) if "identified_summary" in replay else None,
-                    "torque_corrected_pass": bool(replay["corrected_summary"]["pass"]) if "corrected_summary" in replay else None,
-                    "max_nominal_torque_ratio": float(replay["nominal_summary"]["max_ratio"]) if "nominal_summary" in replay else None,
-                    "max_identified_torque_ratio": float(replay["identified_summary"]["max_ratio"]) if "identified_summary" in replay else None,
-                    "worst_joint": worst_joint,
-                    "worst_time_s": worst_time_s,
-                    "design_summary": design_summary,
-                }
-                replay["t"] = t_dense
-                return replay, summary
-
-            nominal_params_used = true_nominal_params.copy()
-            exc_result = None
-            identification = None
-            sequential_history = []
-
-            if torque_method == "sequential_redesign":
-                log.info("-- Stage 5: Sequential torque-limited excitation redesign --")
-                torque_cfg = cfg["excitation"].get("torque_constraint", {})
-                current_nominal = true_nominal_params.copy()
-                max_iterations = int(torque_cfg.get("max_iterations", 3))
-                convergence_tol = float(torque_cfg.get("convergence_tol", 0.01))
-
-                for iteration in range(max_iterations):
-                    nominal_params_used = current_nominal.copy()
-                    iter_cfg = deepcopy(cfg["excitation"])
-                    iter_cfg["torque_constraint_method"] = "nominal_hard"
-                    log.info("Sequential redesign iteration %d/%d", iteration + 1, max_iterations)
-                    exc_result = optimise_excitation(
-                        kin, iter_cfg, q_lim, dq_lim, ddq_lim,
-                        friction_model=cfg["friction"]["model"],
-                        regressor_fn=regressor_fn if cfg["method"] == "euler_lagrange" else None,
-                        tau_lim=tau_lim,
-                        nominal_params=nominal_params_used,
-                    )
-                    q_data, dq_data, ddq_data, tau_data, data_fs = _load_or_generate_data(exc_result)
-                    identification = _solve_identification_pass(q_data, dq_data, ddq_data, tau_data, data_fs)
-                    replay, _ = _validate_torque_models(
-                        exc_result,
-                        nominal_params_used,
-                        identification["pi_identified_full"],
-                        identification["pi_corrected"],
-                        "nominal_hard",
-                    )
-                    updated_nominal = np.asarray(identification["pi_corrected"], dtype=float)
-                    rel_change = np.linalg.norm(updated_nominal - current_nominal) / max(
-                        np.linalg.norm(current_nominal), 1e-12
-                    )
-                    sequential_history.append({
-                        "iteration": iteration + 1,
-                        "nominal_params": nominal_params_used.tolist(),
-                        "identified_params": identification["pi_identified_full"].tolist(),
-                        "max_nominal_torque_ratio": (
-                            float(replay["nominal_summary"]["max_ratio"])
-                            if replay is not None and "nominal_summary" in replay else None
-                        ),
-                        "max_identified_torque_ratio": (
-                            float(replay["identified_summary"]["max_ratio"])
-                            if replay is not None and "identified_summary" in replay else None
-                        ),
-                        "relative_model_change": float(rel_change),
-                    })
-                    current_nominal = updated_nominal
-                    if rel_change <= convergence_tol:
-                        log.info("Sequential redesign converged after %d iterations.", iteration + 1)
-                        break
-            else:
-                log.info("-- Stage 5: Excitation trajectory optimisation --")
-                exc_result = optimise_excitation(
-                    kin, cfg["excitation"], q_lim, dq_lim, ddq_lim,
-                    friction_model=cfg["friction"]["model"],
-                    regressor_fn=regressor_fn if cfg["method"] == "euler_lagrange" else None,
-                    tau_lim=tau_lim,
-                    nominal_params=nominal_params_used if torque_required else None,
-                )
-                q_data, dq_data, ddq_data, tau_data, data_fs = _load_or_generate_data(exc_result)
-                identification = _solve_identification_pass(q_data, dq_data, ddq_data, tau_data, data_fs)
-
-            log.info("Excitation cost: %.6f", exc_result["cost"])
-
-            exc_path = self.output_dir / "excitation_trajectory.npz"
-            t_exc, q_exc_T, dq_exc_T, ddq_exc_T, _ = _excitation_time_series(exc_result)
-            np.savez(
-                str(exc_path),
-                **exc_result,
-                t=t_exc,
-                q=q_exc_T.T,
-                dq=dq_exc_T.T,
-                ddq=ddq_exc_T.T,
-                q_lim=q_lim,
-                dq_lim=dq_lim if dq_lim is not None else np.zeros((0, 2)),
-                ddq_lim=ddq_lim if ddq_lim is not None else np.zeros((0, 2)),
-            )
-            log.info("Saved excitation trajectory to %s", exc_path)
-
-            torque_validation, torque_summary = _validate_torque_models(
-                exc_result,
-                nominal_params_used,
-                identification["pi_identified_full"],
-                identification["pi_corrected"],
-                "nominal_hard" if torque_method in {"soft_penalty", "sequential_redesign", "none"} else torque_method,
-            )
-
-            if torque_validation is not None:
-                torque_path = self.output_dir / "torque_limit_validation.npz"
-                np.savez(
-                    str(torque_path),
-                    t=torque_validation["t"],
-                    limit_lower=torque_validation["limit_lower"],
-                    limit_upper=torque_validation["limit_upper"],
-                    tau_nominal=torque_validation.get("tau_nominal"),
-                    tau_identified=torque_validation.get("tau_identified"),
-                    tau_corrected=torque_validation.get("tau_corrected"),
-                    nominal_ratio=(
-                        torque_validation["nominal_summary"]["ratio"]
-                        if "nominal_summary" in torque_validation else None
-                    ),
-                    identified_ratio=(
-                        torque_validation["identified_summary"]["ratio"]
-                        if "identified_summary" in torque_validation else None
-                    ),
-                    corrected_ratio=(
-                        torque_validation["corrected_summary"]["ratio"]
-                        if "corrected_summary" in torque_validation else None
-                    ),
-                    design_lower=torque_validation.get("design_lower"),
-                    design_upper=torque_validation.get("design_upper"),
-                    design_upper_margin=torque_validation.get("design_upper_margin"),
-                    design_lower_margin=torque_validation.get("design_lower_margin"),
-                    design_pass=torque_validation.get("design_pass"),
-                    chance_quantile=torque_validation.get("chance_quantile"),
-                    torque_limit_source=np.array(torque_limit_sources, dtype=object),
-                    sequential_history=np.array(sequential_history, dtype=object),
-                )
-                log.info("Torque validation saved to %s", torque_path)
-
-            log.info("-- Stage 11: Saving results --")
-            results = {
-                "pi_identified": identification["pi_identified_full"],
-                "pi_base": identification["pi_base"],
-                "P_matrix": identification["P_mat"],
-                "kept_cols": np.array(identification["kept_cols"]),
-                "residual": identification["residual"],
-                "feasible": identification["feasible"],
-                "pi_corrected": identification["pi_corrected"],
-                "method": cfg["method"],
-                "friction_model": cfg["friction"]["model"],
-                "nDoF": kin.nDoF,
-                "solved_in_full_space": identification["info"].get("solved_in_full_space", False),
-                "torque_constraint_method": torque_method,
-                "torque_limit_source": np.array(torque_limit_sources, dtype=object)
-                if torque_limit_sources is not None else np.array([], dtype=object),
-                "sequential_history": np.array(sequential_history, dtype=object),
-            }
-            out_path = self.output_dir / "identification_results.npz"
-            np.savez(str(out_path), **results)
-            log.info("Results saved to %s", out_path)
-
-            summary_path = self.output_dir / "results_summary.json"
-            summary = {
-                "method": cfg["method"],
-                "nDoF": kin.nDoF,
-                "n_base_params": identification["rank"],
-                "n_full_params": len(_nominal_parameter_vector()),
-                "residual": float(identification["residual"]),
-                "feasible": bool(identification["feasible"]),
-                "friction_model": cfg["friction"]["model"],
-                "n_friction_params": identification["n_fric"],
-                "solver": identification["solver"],
-                "pi_identified": identification["pi_identified_full"].tolist(),
-                "torque_constraint_method": torque_method,
-                "torque_limit_source": torque_limit_sources,
-                "torque_nominal_pass": None if torque_summary is None else torque_summary["torque_nominal_pass"],
-                "torque_identified_pass": None if torque_summary is None else torque_summary["torque_identified_pass"],
-                "torque_corrected_pass": None if torque_summary is None else torque_summary["torque_corrected_pass"],
-                "max_nominal_torque_ratio": None if torque_summary is None else torque_summary["max_nominal_torque_ratio"],
-                "max_identified_torque_ratio": None if torque_summary is None else torque_summary["max_identified_torque_ratio"],
-                "worst_joint": None if torque_summary is None else torque_summary["worst_joint"],
-                "worst_time_s": None if torque_summary is None else torque_summary["worst_time_s"],
-                "sequential_history": sequential_history,
-            }
-            if torque_summary is not None and torque_summary.get("design_summary") is not None:
-                summary["torque_design_summary"] = torque_summary["design_summary"]
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(summary, f, indent=2)
-            log.info("Summary saved to %s", summary_path)
+                # Full mode (default, backward compatible)
+                ctx = self._run_stages_1_to_4()
+                self._run_stage_5(ctx)
+                self._run_stage_6(ctx)
+                self._run_stages_7_to_11(ctx)
 
             elapsed = time.time() - t0
             log.info("=" * 60)
@@ -496,3 +107,741 @@ class SystemIdentificationPipeline:
             log.error("Error: %s", str(e))
             log.debug(traceback.format_exc())
             raise
+
+    # ------------------------------------------------------------------
+    # Stage groups
+    # ------------------------------------------------------------------
+
+    def _run_stages_1_to_4(self) -> dict:
+        """Stages 1-4: URDF parse, joint limits, kinematics, regressor setup.
+
+        Returns a context dict that carries all cross-stage state.
+        """
+        log = self.logger
+        cfg = self.cfg
+
+        log.info("-- Stage 1: Parsing URDF --")
+        robot = parse_urdf(cfg["urdf_path"])
+        log.info("Robot: '%s', %d DoF, revolute joints: %s",
+                 robot.name, robot.nDoF, robot.revolute_joint_names)
+
+        log.info("-- Stage 2: Extracting joint limits --")
+        q_lim, dq_lim, ddq_lim = extract_joint_limits(
+            robot, cfg["joint_limits"], log
+        )
+        torque_method = cfg["excitation"].get("torque_constraint_method", "none")
+        torque_required = torque_method != "none"
+        tau_lim, torque_limit_sources = extract_torque_limits(
+            robot, cfg["joint_limits"], log, required=torque_required
+        )
+        log.info("-- Preflight: Checking excitation feasibility --")
+        preflight_excitation_config(
+            cfg["excitation"], q_lim, dq_lim, ddq_lim, log,
+        )
+
+        log.info("-- Stage 3: Building kinematics --")
+        kin = RobotKinematics(robot, log)
+        log.info("Initial parameter vector (10n=%d): %s",
+                 len(kin.PI), kin.PI.flatten()[:6].tolist())
+
+        log.info("-- Stage 4: Setting up regressor (%s) --", cfg["method"])
+        el_kept_cols = None
+        if cfg["method"] == "newton_euler":
+            def regressor_fn(q, dq, ddq):
+                return newton_euler_regressor(kin, q, dq, ddq)
+        else:
+            cache_dir = str(self.output_dir / "el_cache")
+            regressor_fn, el_kept_cols = euler_lagrange_regressor_builder(
+                kin, cache_dir
+            )
+            log.info("EL regressor: %d kept columns.", len(el_kept_cols))
+
+        augmented_regressor_fn = make_augmented_regressor(
+            regressor_fn, cfg["friction"]["model"]
+        )
+
+        true_nominal_params = self._nominal_parameter_vector(
+            kin, el_kept_cols
+        )
+
+        return {
+            "robot": robot,
+            "kin": kin,
+            "q_lim": q_lim,
+            "dq_lim": dq_lim,
+            "ddq_lim": ddq_lim,
+            "tau_lim": tau_lim,
+            "torque_limit_sources": torque_limit_sources,
+            "regressor_fn": regressor_fn,
+            "augmented_regressor_fn": augmented_regressor_fn,
+            "el_kept_cols": el_kept_cols,
+            "torque_method": torque_method,
+            "torque_required": torque_required,
+            "true_nominal_params": true_nominal_params,
+            # These will be populated by later stages:
+            "exc_result": None,
+            "nominal_params_used": true_nominal_params.copy(),
+            "sequential_history": [],
+            "identification": None,
+            "q_data": None,
+            "dq_data": None,
+            "ddq_data": None,
+            "tau_data": None,
+            "data_fs": None,
+        }
+
+    def _run_stage_5(self, ctx: dict) -> None:
+        """Stage 5: Excitation trajectory optimisation.
+
+        Populates ctx with exc_result, nominal_params_used, sequential_history,
+        and (for sequential_redesign) also identification.
+        """
+        log = self.logger
+        cfg = self.cfg
+        kin = ctx["kin"]
+        q_lim = ctx["q_lim"]
+        dq_lim = ctx["dq_lim"]
+        ddq_lim = ctx["ddq_lim"]
+        tau_lim = ctx["tau_lim"]
+        torque_method = ctx["torque_method"]
+        torque_required = ctx["torque_required"]
+        regressor_fn = ctx["regressor_fn"]
+        true_nominal_params = ctx["true_nominal_params"]
+
+        nominal_params_used = true_nominal_params.copy()
+        sequential_history = []
+
+        if torque_method == "sequential_redesign":
+            log.info("-- Stage 5: Sequential torque-limited excitation redesign --")
+            torque_cfg = cfg["excitation"].get("torque_constraint", {})
+            current_nominal = true_nominal_params.copy()
+            max_iterations = int(torque_cfg.get("max_iterations", 3))
+            convergence_tol = float(torque_cfg.get("convergence_tol", 0.01))
+
+            for iteration in range(max_iterations):
+                nominal_params_used = current_nominal.copy()
+                iter_cfg = deepcopy(cfg["excitation"])
+                iter_cfg["torque_constraint_method"] = "nominal_hard"
+                log.info("Sequential redesign iteration %d/%d",
+                         iteration + 1, max_iterations)
+                exc_result = optimise_excitation(
+                    kin, iter_cfg, q_lim, dq_lim, ddq_lim,
+                    friction_model=cfg["friction"]["model"],
+                    regressor_fn=regressor_fn if cfg["method"] == "euler_lagrange" else None,
+                    tau_lim=tau_lim,
+                    nominal_params=nominal_params_used,
+                )
+
+                log.info("-- Stage 6 (iter %d): Generating trajectory data --",
+                         iteration + 1)
+                q_data, dq_data, ddq_data, tau_data, data_fs = \
+                    self._load_or_generate_data(ctx, exc_result)
+
+                identification = self._solve_identification_pass(ctx, q_data,
+                    dq_data, ddq_data, tau_data, data_fs)
+                replay, _ = self._validate_torque_models(
+                    ctx, exc_result, nominal_params_used,
+                    identification["pi_identified_full"],
+                    identification["pi_corrected"],
+                    "nominal_hard",
+                )
+                updated_nominal = np.asarray(identification["pi_corrected"],
+                                             dtype=float)
+                rel_change = np.linalg.norm(
+                    updated_nominal - current_nominal
+                ) / max(np.linalg.norm(current_nominal), 1e-12)
+                sequential_history.append({
+                    "iteration": iteration + 1,
+                    "nominal_params": nominal_params_used.tolist(),
+                    "identified_params": identification["pi_identified_full"].tolist(),
+                    "max_nominal_torque_ratio": (
+                        float(replay["nominal_summary"]["max_ratio"])
+                        if replay is not None and "nominal_summary" in replay
+                        else None
+                    ),
+                    "max_identified_torque_ratio": (
+                        float(replay["identified_summary"]["max_ratio"])
+                        if replay is not None and "identified_summary" in replay
+                        else None
+                    ),
+                    "relative_model_change": float(rel_change),
+                })
+                current_nominal = updated_nominal
+                if rel_change <= convergence_tol:
+                    log.info("Sequential redesign converged after %d iterations.",
+                             iteration + 1)
+                    break
+
+            ctx["exc_result"] = exc_result
+            ctx["nominal_params_used"] = nominal_params_used
+            ctx["sequential_history"] = sequential_history
+            ctx["identification"] = identification
+            # Store the final iteration's data
+            ctx["q_data"] = q_data
+            ctx["dq_data"] = dq_data
+            ctx["ddq_data"] = ddq_data
+            ctx["tau_data"] = tau_data
+            ctx["data_fs"] = data_fs
+
+        else:
+            log.info("-- Stage 5: Excitation trajectory optimisation --")
+            exc_result = optimise_excitation(
+                kin, cfg["excitation"], q_lim, dq_lim, ddq_lim,
+                friction_model=cfg["friction"]["model"],
+                regressor_fn=regressor_fn if cfg["method"] == "euler_lagrange" else None,
+                tau_lim=tau_lim,
+                nominal_params=nominal_params_used if torque_required else None,
+            )
+            ctx["exc_result"] = exc_result
+            ctx["nominal_params_used"] = nominal_params_used
+            ctx["sequential_history"] = sequential_history
+
+        log.info("Excitation cost: %.6f", ctx["exc_result"]["cost"])
+
+    def _run_stage_6(self, ctx: dict) -> None:
+        """Stage 6: Data generation (synthetic or external).
+
+        Populates ctx with q_data, dq_data, ddq_data, tau_data, data_fs.
+        For sequential_redesign, data was already generated in Stage 5.
+        """
+        log = self.logger
+        torque_method = ctx["torque_method"]
+
+        if torque_method == "sequential_redesign":
+            # Data already generated inside the sequential loop
+            log.info("-- Stage 6: Data generation (done in sequential redesign) --")
+            return
+
+        log.info("-- Stage 6: Generating trajectory data --")
+        q_data, dq_data, ddq_data, tau_data, data_fs = \
+            self._load_or_generate_data(ctx, ctx["exc_result"])
+        ctx["q_data"] = q_data
+        ctx["dq_data"] = dq_data
+        ctx["ddq_data"] = ddq_data
+        ctx["tau_data"] = tau_data
+        ctx["data_fs"] = data_fs
+
+    def _run_stages_7_to_11(self, ctx: dict) -> None:
+        """Stages 7-11: observation matrix, base-param reduction,
+        identification, feasibility, torque validation, save results.
+        """
+        log = self.logger
+        cfg = self.cfg
+        kin = ctx["kin"]
+        torque_method = ctx["torque_method"]
+        torque_limit_sources = ctx["torque_limit_sources"]
+        exc_result = ctx["exc_result"]
+        nominal_params_used = ctx["nominal_params_used"]
+        sequential_history = ctx["sequential_history"]
+
+        # For sequential_redesign, identification was already done in Stage 5.
+        # For all other modes, run it now.
+        if torque_method == "sequential_redesign":
+            identification = ctx["identification"]
+        else:
+            identification = self._solve_identification_pass(
+                ctx,
+                ctx["q_data"], ctx["dq_data"], ctx["ddq_data"],
+                ctx["tau_data"], ctx["data_fs"],
+            )
+
+        # Save excitation trajectory (unless already saved in excitation_only
+        # mode — but in full/resume mode we always save it here)
+        self._save_excitation_trajectory(ctx)
+
+        # Torque validation
+        torque_validation, torque_summary = self._validate_torque_models(
+            ctx, exc_result, nominal_params_used,
+            identification["pi_identified_full"],
+            identification["pi_corrected"],
+            "nominal_hard" if torque_method in {
+                "soft_penalty", "sequential_redesign", "none"
+            } else torque_method,
+        )
+
+        if torque_validation is not None:
+            torque_path = self.output_dir / "torque_limit_validation.npz"
+            np.savez(
+                str(torque_path),
+                t=torque_validation["t"],
+                limit_lower=torque_validation["limit_lower"],
+                limit_upper=torque_validation["limit_upper"],
+                tau_nominal=torque_validation.get("tau_nominal"),
+                tau_identified=torque_validation.get("tau_identified"),
+                tau_corrected=torque_validation.get("tau_corrected"),
+                nominal_ratio=(
+                    torque_validation["nominal_summary"]["ratio"]
+                    if "nominal_summary" in torque_validation else None
+                ),
+                identified_ratio=(
+                    torque_validation["identified_summary"]["ratio"]
+                    if "identified_summary" in torque_validation else None
+                ),
+                corrected_ratio=(
+                    torque_validation["corrected_summary"]["ratio"]
+                    if "corrected_summary" in torque_validation else None
+                ),
+                design_lower=torque_validation.get("design_lower"),
+                design_upper=torque_validation.get("design_upper"),
+                design_upper_margin=torque_validation.get("design_upper_margin"),
+                design_lower_margin=torque_validation.get("design_lower_margin"),
+                design_pass=torque_validation.get("design_pass"),
+                chance_quantile=torque_validation.get("chance_quantile"),
+                torque_limit_source=np.array(torque_limit_sources, dtype=object),
+                sequential_history=np.array(sequential_history, dtype=object),
+            )
+            log.info("Torque validation saved to %s", torque_path)
+
+        log.info("-- Stage 11: Saving results --")
+        results = {
+            "pi_identified": identification["pi_identified_full"],
+            "pi_base": identification["pi_base"],
+            "P_matrix": identification["P_mat"],
+            "kept_cols": np.array(identification["kept_cols"]),
+            "residual": identification["residual"],
+            "feasible": identification["feasible"],
+            "pi_corrected": identification["pi_corrected"],
+            "method": cfg["method"],
+            "friction_model": cfg["friction"]["model"],
+            "nDoF": kin.nDoF,
+            "solved_in_full_space": identification["info"].get(
+                "solved_in_full_space", False
+            ),
+            "torque_constraint_method": torque_method,
+            "torque_limit_source": np.array(torque_limit_sources, dtype=object)
+            if torque_limit_sources is not None
+            else np.array([], dtype=object),
+            "sequential_history": np.array(sequential_history, dtype=object),
+        }
+        out_path = self.output_dir / "identification_results.npz"
+        np.savez(str(out_path), **results)
+        log.info("Results saved to %s", out_path)
+
+        summary_path = self.output_dir / "results_summary.json"
+        summary = {
+            "method": cfg["method"],
+            "nDoF": kin.nDoF,
+            "n_base_params": identification["rank"],
+            "n_full_params": len(self._nominal_parameter_vector(
+                kin, ctx["el_kept_cols"]
+            )),
+            "residual": float(identification["residual"]),
+            "feasible": bool(identification["feasible"]),
+            "friction_model": cfg["friction"]["model"],
+            "n_friction_params": identification["n_fric"],
+            "solver": identification["solver"],
+            "pi_identified": identification["pi_identified_full"].tolist(),
+            "torque_constraint_method": torque_method,
+            "torque_limit_source": torque_limit_sources,
+            "torque_nominal_pass": (
+                None if torque_summary is None
+                else torque_summary["torque_nominal_pass"]
+            ),
+            "torque_identified_pass": (
+                None if torque_summary is None
+                else torque_summary["torque_identified_pass"]
+            ),
+            "torque_corrected_pass": (
+                None if torque_summary is None
+                else torque_summary["torque_corrected_pass"]
+            ),
+            "max_nominal_torque_ratio": (
+                None if torque_summary is None
+                else torque_summary["max_nominal_torque_ratio"]
+            ),
+            "max_identified_torque_ratio": (
+                None if torque_summary is None
+                else torque_summary["max_identified_torque_ratio"]
+            ),
+            "worst_joint": (
+                None if torque_summary is None
+                else torque_summary["worst_joint"]
+            ),
+            "worst_time_s": (
+                None if torque_summary is None
+                else torque_summary["worst_time_s"]
+            ),
+            "sequential_history": sequential_history,
+        }
+        if (torque_summary is not None
+                and torque_summary.get("design_summary") is not None):
+            summary["torque_design_summary"] = torque_summary["design_summary"]
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        log.info("Summary saved to %s", summary_path)
+
+    # ------------------------------------------------------------------
+    # Checkpoint save / load
+    # ------------------------------------------------------------------
+
+    def _save_checkpoint(self, ctx: dict) -> Path:
+        """Serialize excitation + data state to checkpoint files."""
+        checkpoint_path = self.output_dir / "checkpoint.npz"
+        exc = ctx["exc_result"]
+        np.savez(
+            str(checkpoint_path),
+            exc_params=exc["params"],
+            exc_freqs=exc["freqs"],
+            exc_q0=exc["q0"],
+            exc_cost=np.float64(exc["cost"]),
+            exc_basis=np.array(exc["basis"]),
+            exc_optimize_phase=np.array(exc["optimize_phase"]),
+            exc_torque_constraint_method=np.array(
+                exc.get("torque_constraint_method", "none")
+            ),
+            q_data=ctx["q_data"],
+            dq_data=ctx["dq_data"],
+            ddq_data=ctx["ddq_data"],
+            tau_data=ctx["tau_data"],
+            data_fs=np.float64(ctx["data_fs"]),
+            nominal_params_used=ctx["nominal_params_used"],
+            sequential_history=np.array(
+                ctx["sequential_history"], dtype=object
+            ),
+        )
+
+        config_path = self.output_dir / "checkpoint_config.json"
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(self.cfg, f, indent=2, default=str)
+
+        self.logger.info("Checkpoint saved to %s", checkpoint_path)
+        return checkpoint_path
+
+    @staticmethod
+    def _load_checkpoint(checkpoint_dir: Path) -> dict:
+        """Load checkpoint data from a previous run."""
+        cp_file = checkpoint_dir / "checkpoint.npz"
+        if not cp_file.exists():
+            raise FileNotFoundError(
+                f"Checkpoint file not found: {cp_file}. "
+                f"Make sure the checkpoint_dir points to a directory "
+                f"produced by an excitation_only run."
+            )
+
+        cp = np.load(str(cp_file), allow_pickle=True)
+
+        exc_result = {
+            "params": cp["exc_params"],
+            "freqs": cp["exc_freqs"],
+            "q0": cp["exc_q0"],
+            "cost": float(cp["exc_cost"]),
+            "basis": str(cp["exc_basis"]),
+            "optimize_phase": bool(cp["exc_optimize_phase"]),
+            "torque_constraint_method": str(
+                cp["exc_torque_constraint_method"]
+            ),
+        }
+
+        seq_hist_raw = cp["sequential_history"]
+        if seq_hist_raw.ndim == 0:
+            # Scalar array wrapping an object — unwrap
+            seq_hist = seq_hist_raw.item()
+            if seq_hist is None:
+                seq_hist = []
+        else:
+            seq_hist = seq_hist_raw.tolist() if seq_hist_raw.size > 0 else []
+
+        return {
+            "exc_result": exc_result,
+            "q_data": cp["q_data"],
+            "dq_data": cp["dq_data"],
+            "ddq_data": cp["ddq_data"],
+            "tau_data": cp["tau_data"],
+            "data_fs": float(cp["data_fs"]),
+            "nominal_params_used": cp["nominal_params_used"],
+            "sequential_history": seq_hist,
+        }
+
+    # ------------------------------------------------------------------
+    # Helper methods (formerly closures inside run())
+    # ------------------------------------------------------------------
+
+    def _rigid_nominal_vector(self, kin, el_kept_cols):
+        """Return the rigid-body nominal parameter vector."""
+        if self.cfg["method"] == "euler_lagrange" and el_kept_cols is not None:
+            return kin.PI.flatten()[el_kept_cols]
+        return kin.PI.flatten()
+
+    def _nominal_parameter_vector(self, kin, el_kept_cols,
+                                  seed_vector=None):
+        """Build nominal parameter vector (rigid + friction padding)."""
+        if seed_vector is None:
+            rigid = self._rigid_nominal_vector(kin, el_kept_cols)
+        else:
+            rigid = np.asarray(seed_vector, dtype=float)
+        return build_nominal_parameter_vector(
+            rigid, kin.nDoF, self.cfg["friction"]["model"],
+        )
+
+    def _excitation_time_series(self, exc_result):
+        """Evaluate the Fourier trajectory at a dense time grid."""
+        freqs = exc_result["freqs"]
+        q0 = exc_result["q0"]
+        basis = exc_result["basis"]
+        opt_phase = exc_result["optimize_phase"]
+        params = exc_result["params"]
+
+        cfg = self.cfg
+        f0 = cfg["excitation"]["base_frequency_hz"]
+        tf = cfg["excitation"].get("trajectory_duration_periods", 1) / f0
+        data_fs = 2.0 * freqs[-1] * 10
+        t_data = np.arange(0.0, tf, 1.0 / data_fs)
+        q_data_t, dq_data_t, ddq_data_t = fourier_trajectory(
+            params, freqs, t_data, q0, basis, opt_phase
+        )
+        return t_data, q_data_t.T, dq_data_t.T, ddq_data_t.T, data_fs
+
+    def _load_or_generate_data(self, ctx, exc_result):
+        """Load external data or generate synthetic trajectory + torques."""
+        log = self.logger
+        cfg = self.cfg
+        kin = ctx["kin"]
+        augmented_regressor_fn = ctx["augmented_regressor_fn"]
+        true_nominal_params = ctx["true_nominal_params"]
+
+        data_file = cfg["identification"].get("data_file")
+        if data_file:
+            log.info("Loading external data from %s", data_file)
+            data = np.load(data_file)
+            q_data = data["q"]
+            dq_data = data["dq"]
+            ddq_data = data["ddq"]
+            tau_data = data["tau"]
+            data_fs = float(data.get("fs", 1e4))
+            return q_data, dq_data, ddq_data, tau_data, data_fs
+
+        log.info("Generating synthetic trajectory from excitation parameters.")
+        _, q_data, dq_data, ddq_data, data_fs = \
+            self._excitation_time_series(exc_result)
+        N = q_data.shape[0]
+        tau_data = np.zeros((N, kin.nDoF))
+        for k in range(N):
+            tau_data[k] = augmented_regressor_fn(
+                q_data[k], dq_data[k], ddq_data[k]
+            ) @ true_nominal_params
+        log.info("Generated %d data samples at %.1f Hz", N, data_fs)
+        return q_data, dq_data, ddq_data, tau_data, data_fs
+
+    def _solve_identification_pass(self, ctx, q_data, dq_data, ddq_data,
+                                   tau_data, data_fs):
+        """Stages 7-10: observation matrix → base params → solve → feasibility."""
+        log = self.logger
+        cfg = self.cfg
+        kin = ctx["kin"]
+        regressor_fn = ctx["regressor_fn"]
+        el_kept_cols = ctx["el_kept_cols"]
+
+        log.info("-- Stage 7: Building observation matrix --")
+        W, tau_vec = build_observation_matrix(
+            q_data, dq_data, ddq_data, tau_data,
+            regressor_fn, cfg, data_fs
+        )
+        log.info("W shape: %s", W.shape)
+
+        log.info("-- Stage 8: Base parameter reduction --")
+        pi_full = self._nominal_parameter_vector(kin, el_kept_cols)
+        W_base, P_mat, kept_cols, rank, pi_base = compute_base_parameters(
+            W, pi_full
+        )
+        log.info("Base parameters: %d (from %d full)", rank, len(pi_full))
+
+        log.info("-- Stage 9: Solving identification --")
+        solver = cfg["identification"]["solver"]
+        feas_method = cfg["identification"]["feasibility_method"]
+        bounds_opt = None
+        cfg_bounds = cfg["identification"].get("parameter_bounds")
+        if isinstance(cfg_bounds, list) and len(cfg_bounds) == 2:
+            lb = np.array(cfg_bounds[0])
+            ub = np.array(cfg_bounds[1])
+            if len(lb) == rank and len(ub) == rank:
+                bounds_opt = (lb, ub)
+                if solver == "ols":
+                    solver = "bounded_ls"
+                    log.info("Switching to bounded_ls due to user parameter_bounds.")
+        elif cfg_bounds is True:
+            lb = pi_base - np.abs(pi_base) * 0.5 - 1e-3
+            ub = pi_base + np.abs(pi_base) * 0.5 + 1e-3
+            bounds_opt = (lb, ub)
+            if solver == "ols":
+                solver = "bounded_ls"
+                log.info("Switching to bounded_ls due to parameter_bounds=true")
+
+        pi_hat, residual, info = solve_identification(
+            W_base, tau_vec, solver=solver, bounds=bounds_opt,
+            nDoF=kin.nDoF, feasibility_method=feas_method,
+            P_mat=P_mat if feas_method != "none" else None,
+        )
+        log.info("Identified %d parameters, residual=%.6e",
+                 len(pi_hat), residual)
+
+        if info.get("solved_in_full_space"):
+            pi_identified_full = pi_hat
+        else:
+            pi_identified_full = np.linalg.pinv(P_mat) @ pi_hat
+
+        recon_err = np.linalg.norm(
+            W_base @ (P_mat @ pi_identified_full) - W_base @ pi_hat
+            if not info.get("solved_in_full_space")
+            else W_base @ P_mat @ pi_identified_full - tau_vec
+        )
+        log.debug(
+            "Reconstruction consistency: ||W_b*P*pi_recon - ref|| = %.3e",
+            recon_err,
+        )
+
+        log.info("-- Stage 10: Feasibility check --")
+        report, feasible, pi_corrected = check_feasibility(
+            pi_identified_full, kin.nDoF, method=feas_method
+        )
+        for r in report:
+            if r["feasible"]:
+                log.info("  Link %d: FEASIBLE (mass=%.4f)",
+                         r["link"], r["mass"])
+            else:
+                log.warning("  Link %d: INFEASIBLE -- %s",
+                            r["link"], "; ".join(r["issues"]))
+
+        return {
+            "W": W,
+            "tau_vec": tau_vec,
+            "W_base": W_base,
+            "P_mat": P_mat,
+            "kept_cols": kept_cols,
+            "rank": rank,
+            "pi_base": (pi_hat if not info.get("solved_in_full_space")
+                        else P_mat @ pi_identified_full),
+            "pi_identified_full": pi_identified_full,
+            "pi_corrected": pi_corrected,
+            "residual": residual,
+            "report": report,
+            "feasible": feasible,
+            "info": info,
+            "solver": solver,
+            "n_fric": friction_param_count(kin.nDoF, cfg["friction"]["model"]),
+        }
+
+    def _validate_torque_models(self, ctx, exc_result, nominal_params_used,
+                                identified_params, corrected_params,
+                                design_method):
+        """Dense torque-limit validation across the trajectory."""
+        cfg = self.cfg
+        tau_lim = ctx["tau_lim"]
+        augmented_regressor_fn = ctx["augmented_regressor_fn"]
+        torque_limit_sources = ctx["torque_limit_sources"]
+
+        if tau_lim is None:
+            return None, None
+
+        t_dense = validation_time_vector(
+            exc_result["freqs"],
+            cfg["excitation"]["base_frequency_hz"],
+            cfg["excitation"].get("trajectory_duration_periods", 1),
+            cfg["excitation"].get("torque_validation_oversample_factor", 1),
+        )
+        q_dense, dq_dense, ddq_dense = fourier_trajectory(
+            exc_result["params"],
+            exc_result["freqs"],
+            t_dense,
+            exc_result["q0"],
+            exc_result["basis"],
+            exc_result["optimize_phase"],
+        )
+        replay = replay_torque_models(
+            q_dense, dq_dense, ddq_dense, augmented_regressor_fn, tau_lim,
+            "actuator_envelope" if design_method == "actuator_envelope"
+            else "nominal_hard",
+            cfg["excitation"].get("torque_constraint", {}),
+            nominal_params=nominal_params_used,
+            identified_params=identified_params,
+            corrected_params=corrected_params,
+        )
+
+        design_summary = None
+        if design_method in {
+            "nominal_hard", "robust_box", "chance", "actuator_envelope"
+        }:
+            design_data = compute_torque_design_data(
+                q_dense, dq_dense, ddq_dense,
+                augmented_regressor_fn,
+                nominal_params_used,
+                tau_lim,
+                design_method,
+                cfg["excitation"].get("torque_constraint", {}),
+            )
+            replay["design_lower"] = design_data["design_lower"]
+            replay["design_upper"] = design_data["design_upper"]
+            replay["design_upper_margin"] = design_data["design_upper_margin"]
+            replay["design_lower_margin"] = design_data["design_lower_margin"]
+            replay["design_pass"] = np.array(design_data["design_pass"])
+            if design_data["quantile"] is not None:
+                replay["chance_quantile"] = np.array(design_data["quantile"])
+            design_summary = {
+                "design_pass": bool(design_data["design_pass"]),
+                "quantile": (
+                    None if design_data["quantile"] is None
+                    else float(design_data["quantile"])
+                ),
+            }
+
+        worst_source = replay.get("identified_summary",
+                                  replay.get("nominal_summary"))
+        worst_joint = None
+        worst_time_s = None
+        if worst_source is not None:
+            worst_joint = int(worst_source["worst_joint"])
+            worst_time_s = float(t_dense[worst_source["worst_time_index"]])
+
+        summary = {
+            "torque_constraint_method": cfg["excitation"].get(
+                "torque_constraint_method", "none"
+            ),
+            "torque_limit_source": torque_limit_sources,
+            "torque_nominal_pass": (
+                bool(replay["nominal_summary"]["pass"])
+                if "nominal_summary" in replay else None
+            ),
+            "torque_identified_pass": (
+                bool(replay["identified_summary"]["pass"])
+                if "identified_summary" in replay else None
+            ),
+            "torque_corrected_pass": (
+                bool(replay["corrected_summary"]["pass"])
+                if "corrected_summary" in replay else None
+            ),
+            "max_nominal_torque_ratio": (
+                float(replay["nominal_summary"]["max_ratio"])
+                if "nominal_summary" in replay else None
+            ),
+            "max_identified_torque_ratio": (
+                float(replay["identified_summary"]["max_ratio"])
+                if "identified_summary" in replay else None
+            ),
+            "worst_joint": worst_joint,
+            "worst_time_s": worst_time_s,
+            "design_summary": design_summary,
+        }
+        replay["t"] = t_dense
+        return replay, summary
+
+    def _save_excitation_trajectory(self, ctx: dict) -> None:
+        """Save excitation_trajectory.npz (for PyBullet validation compat)."""
+        exc_result = ctx["exc_result"]
+        q_lim = ctx["q_lim"]
+        dq_lim = ctx["dq_lim"]
+        ddq_lim = ctx["ddq_lim"]
+
+        exc_path = self.output_dir / "excitation_trajectory.npz"
+        t_exc, q_exc_T, dq_exc_T, ddq_exc_T, _ = \
+            self._excitation_time_series(exc_result)
+        np.savez(
+            str(exc_path),
+            **exc_result,
+            t=t_exc,
+            q=q_exc_T.T,
+            dq=dq_exc_T.T,
+            ddq=ddq_exc_T.T,
+            q_lim=q_lim,
+            dq_lim=dq_lim if dq_lim is not None else np.zeros((0, 2)),
+            ddq_lim=ddq_lim if ddq_lim is not None else np.zeros((0, 2)),
+        )
+        self.logger.info("Saved excitation trajectory to %s", exc_path)

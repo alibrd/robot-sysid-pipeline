@@ -49,6 +49,119 @@ from one orchestration config:
 python run_workflow.py config/my_workflow.json
 ```
 
+## Pipeline modes
+
+The pipeline supports three run modes, all selectable from the JSON config file.
+Two optional config fields control the mode: `excitation_only` (boolean) and
+`checkpoint_dir` (path string or `null`). When neither is set, the pipeline
+runs end-to-end. These fields are mutually exclusive — setting both is an error.
+
+### Mode 1: Full pipeline (Stages 1–11)
+
+This is the default. The pipeline runs all stages from URDF parsing through
+identification and saves the final results. The workflow runner
+(`run_workflow.py`) can orchestrate this mode together with PyBullet validation,
+report generation, and benchmarking.
+
+```json
+{
+  "urdf_path": "path/to/robot.urdf",
+  "output_dir": "output/full_run"
+}
+```
+
+```bash
+python run_pipeline.py config/my_robot.json
+python run_workflow.py config/my_workflow.json
+```
+
+### Mode 2: Resume from checkpoint (Stages 1–4 reconstructed, then 7–11)
+
+Set `checkpoint_dir` to the output directory of a previous excitation-only run.
+The pipeline reconstructs the regressor from the URDF (Stages 1–4, which take
+less than a second), loads the excitation trajectory and data from the
+checkpoint, then runs identification through to results (Stages 7–11). The
+workflow runner supports this mode as well.
+
+```json
+{
+  "urdf_path": "path/to/robot.urdf",
+  "output_dir": "output/identification_phase",
+  "checkpoint_dir": "output/excitation_phase"
+}
+```
+
+```bash
+python run_pipeline.py config/my_robot_resume.json
+# or override on CLI:
+python run_pipeline.py config/my_robot.json --checkpoint-dir output/excitation_phase
+```
+
+The `checkpoint_dir` path is resolved relative to the config file location,
+just like `urdf_path`. When using the workflow runner, set
+`pipeline.checkpoint_dir` in the workflow config to inject this into the
+pipeline config.
+
+### Mode 3: Excitation only (Stages 1–6)
+
+Set `excitation_only` to `true`. The pipeline runs through excitation
+optimisation and data generation, saves a checkpoint (`checkpoint.npz` and
+`checkpoint_config.json`), then stops. The checkpoint contains the optimised
+Fourier trajectory parameters, the generated trajectory data, and the nominal
+parameter vector used during design. The workflow runner does not support this
+mode because there are no identification results to validate.
+
+```json
+{
+  "urdf_path": "path/to/robot.urdf",
+  "output_dir": "output/excitation_phase",
+  "excitation_only": true
+}
+```
+
+```bash
+python run_pipeline.py config/my_robot_excitation.json
+# or override on CLI:
+python run_pipeline.py config/my_robot.json --excitation-only
+```
+
+### How mode selection works in the code
+
+The mode is determined entirely from the merged config dictionary inside
+`SystemIdentificationPipeline.run()`. The logic is:
+
+1. If `checkpoint_dir` is set (non-null) → **Mode 2** (resume). Load
+   checkpoint, reconstruct Stages 1–4 from the URDF, then run Stages 7–11.
+2. Else if `excitation_only` is `true` → **Mode 3** (excitation only). Run
+   Stages 1–6, save checkpoint, stop.
+3. Otherwise → **Mode 1** (full). Run all stages end-to-end.
+
+The `config_loader.py` validation rejects configs where both fields are set.
+CLI arguments (`--excitation-only`, `--checkpoint-dir`) override the config
+fields after loading. The workflow runner (`workflow.py`) injects
+`pipeline.excitation_only` and `pipeline.checkpoint_dir` from the workflow
+config into the pipeline config before constructing the pipeline object.
+
+### Checkpoint file contents
+
+The `checkpoint.npz` file produced by Mode 3 contains:
+
+- Excitation result: optimised Fourier coefficients (`exc_params`), harmonic
+  frequencies (`exc_freqs`), initial joint positions (`exc_q0`), condition
+  number cost (`exc_cost`), basis type, phase optimisation flag, torque
+  constraint method
+- Trajectory data: `q_data`, `dq_data`, `ddq_data`, `tau_data` arrays and
+  sampling frequency `data_fs`
+- The nominal parameter vector used during excitation design
+  (`nominal_params_used`)
+- Sequential redesign history (if applicable)
+
+A `checkpoint_config.json` file is saved alongside it, capturing the full
+merged pipeline config at the time of the excitation run. Mode 2 does not
+currently validate config compatibility between the checkpoint and the resume
+config — the user is responsible for using consistent settings (same URDF,
+method, friction model).
+
 ## JSON configuration
 
 Copy `config/default_config.json` and fill in the fields. Key settings:
@@ -56,6 +169,8 @@ Copy `config/default_config.json` and fill in the fields. Key settings:
 | Field | Values | Description |
 |---|---|---|
 | `urdf_path` | file path | Path to the robot URDF or xacro file |
+| `excitation_only` | `true` / `false` | Stop after Stage 6 and save checkpoint (default `false`) |
+| `checkpoint_dir` | directory path or `null` | Resume from a previous excitation-only output directory (default `null`) |
 | `method` | `newton_euler` / `euler_lagrange` | Dynamics formulation |
 | `excitation.basis_functions` | `cosine` / `sine` / `both` | Fourier basis |
 | `excitation.optimize_phase` | `true` / `false` | Phase optimisation (only used with `both`) |
@@ -164,6 +279,10 @@ All outputs are written to `output_dir`:
 - `results_summary.json` -- human-readable summary including torque compliance
   flags, max normalized torque ratio, worst joint/time, and redesign history
   when applicable
+- `checkpoint.npz` -- serialized excitation and trajectory data for pipeline
+  resume (only produced by `excitation_only` mode)
+- `checkpoint_config.json` -- snapshot of the merged pipeline config at the time
+  of the excitation-only run (only produced by `excitation_only` mode)
 
 The standalone PyBullet validator writes outputs to
 `<output_dir>/<robot_name>/`:
@@ -283,6 +402,8 @@ The workflow config supports:
 - `allow_missing_optional_dependencies`
 - `output_root`
 - `pipeline.config_path`
+- `pipeline.excitation_only`
+- `pipeline.checkpoint_dir`
 - `validation.config_path`
 - `validation.auto_from_pipeline`
 - `validation.use_external_artifacts`

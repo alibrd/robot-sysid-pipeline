@@ -2,6 +2,8 @@
     "urdf_path": "",
     "output_dir": "output",
     "method": "newton_euler",
+    "excitation_only": false,
+    "checkpoint_dir": null,
 
     "joint_limits": {
         "position": null,

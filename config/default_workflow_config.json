@@ -6,7 +6,9 @@
   "allow_missing_optional_dependencies": false,
   "output_root": null,
   "pipeline": {
-    "config_path": null
+    "config_path": null,
+    "excitation_only": false,
+    "checkpoint_dir": null
   },
   "validation": {
     "config_path": null,
