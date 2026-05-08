@@ -87,7 +87,6 @@
     },
 
     "plot": {
-        "save_only": true,
         "format": "png",
         "dpi": 150
     },

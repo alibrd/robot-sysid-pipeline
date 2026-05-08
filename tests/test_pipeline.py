@@ -18,6 +18,7 @@ URDF_RRBOT = str(URDF_DIR / "RRBot_single.urdf")
 URDF_PENDULUM = str(URDF_DIR / "DrakePendulum_1DoF.urdf")
 URDF_FINGEREDU = str(URDF_DIR / "FingerEdu_3DoF.xacro")
 URDF_ELBOW = str(URDF_DIR / "ElbowManipulator_3DoF.urdf")
+URDF_FRANKA = str(URDF_DIR / "FrankaFR3_7DoF.urdf")
 URDF_DEFAULT = URDF_RRBOT
 
 
@@ -61,6 +62,28 @@ class TestURDFParsing:
         rev_from_chain = [j.name for j in r.chain_joints
                           if j.joint_type in ("revolute", "continuous")]
         assert r.revolute_joint_names == rev_from_chain
+
+    def test_franka_fr3_7dof_chain_basics(self):
+        """FR3 URDF must parse to a 7-DoF chain with the expected joint names."""
+        from src.urdf_parser import parse_urdf
+        r = parse_urdf(URDF_FRANKA)
+        assert r.nDoF == 7
+        assert r.name == "fr3"
+        assert len(r.revolute_joint_names) == 7
+        expected_joints = [
+            "fr3_joint1", "fr3_joint2", "fr3_joint3",
+            "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7",
+        ]
+        assert r.revolute_joint_names == expected_joints
+
+    def test_franka_fr3_7dof_inertial_parameters_are_finite(self):
+        """FR3 PI vector must be fully finite (no NaN/Inf from URDF inertia blocks)."""
+        from src.urdf_parser import parse_urdf
+        from src.kinematics import RobotKinematics
+        r = parse_urdf(URDF_FRANKA)
+        kin = RobotKinematics(r)
+        assert np.all(np.isfinite(kin.PI))
+        assert kin.PI.shape == (70, 1)
 
 
 class TestElbowManipulator3DoF:

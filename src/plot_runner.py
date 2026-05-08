@@ -11,8 +11,7 @@ def plot_excitation_outputs(pipeline_dir: Path, output_dir: Path, plot_cfg: dict
     figure with three stacked rows (q, dq, ddq) and one curve per DoF.
     """
     import matplotlib
-    if plot_cfg.get("save_only", True):
-        matplotlib.use("Agg")
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     output_dir = Path(output_dir)
@@ -50,8 +49,6 @@ def plot_excitation_outputs(pipeline_dir: Path, output_dir: Path, plot_cfg: dict
     out_file = output_dir / f"excitation_trajectory.{fmt}"
     fig.savefig(str(out_file), dpi=dpi)
 
-    if not plot_cfg.get("save_only", True):
-        plt.show()
     plt.close(fig)
 
     return {"excitation_plot": str(out_file)}

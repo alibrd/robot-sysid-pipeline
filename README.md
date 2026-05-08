@@ -51,7 +51,7 @@ Common invocations map directly onto these flags:
 
 - **Full pipeline** - `stages.excitation=true` and `stages.identification=true`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
 - **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves `checkpoint.npz` and `checkpoint_config.json` under `<output_dir>/pipeline/`.
-- **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11.
+- **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11. Setting `resume.from_checkpoint` together with `stages.excitation=true` is an error; the two modes are mutually exclusive.
 - **Validate an existing excitation** - `stages.validation_pybullet=true`, `stages.excitation=false`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
 - **Plot results** - `stages.plot=true`. Reads `<output_dir>/pipeline/excitation_trajectory.npz` and writes `<output_dir>/plots/excitation_trajectory.png`. Combine with any stage that produces or already has that pipeline artifact.
 - **Compare with PyBullet after a fresh run** - `stages.validation_pybullet=true` with `stages.excitation=true`. The validation stage consumes the excitation artifact produced in the same invocation.
@@ -73,11 +73,10 @@ For one unified `output_dir`:
     identification_results.npz
     results_summary.json
     [checkpoint.npz, checkpoint_config.json]   # excitation-only runs
-  validation/                     # PyBullet validation output (per-robot subdir)
-    <robot_name>/
-      pybullet_validation_summary.json
-      pybullet_validation_data.npz
-      [report artifacts when the report stage is enabled]
+  validation/                     # PyBullet validation output
+    pybullet_validation_summary.json
+    pybullet_validation_data.npz
+    [report artifacts when the report stage is enabled]
     pybullet_validation_benchmark.csv
     pybullet_validation_benchmark.md
   plots/                          # plot stage output
@@ -95,7 +94,7 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `urdf_path` | file path | Path to the robot URDF or xacro file |
 | `output_dir` | directory | Root for all stage outputs; subdirectories `pipeline/`, `validation/`, and `plots/` are created automatically |
 | `stages.*` | booleans | Stage selection (see above) |
-| `resume.from_checkpoint` | path or `null` | Reuse the pipeline artifact directory from a previous unified output |
+| `resume.from_checkpoint` | path or `null` | Reuse the pipeline artifact directory from a previous unified output (JSON: resolved relative to config file; `--resume` CLI flag: resolved relative to working directory) |
 | `method` | `newton_euler` / `euler_lagrange` | Dynamics formulation |
 | `excitation.basis_functions` | `cosine` / `sine` / `both` | Fourier basis |
 | `excitation.optimize_phase` | `true` / `false` | Phase optimisation (only used with `both`) |
@@ -121,7 +120,6 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `validation_pybullet.joint_name_order` | list or `null` | Optional joint-order override |
 | `validation_pybullet.comparison.tolerance_abs` | float | Absolute torque tolerance |
 | `validation_pybullet.comparison.tolerance_normalized_rms` | float | Normalised RMS tolerance |
-| `plot.save_only` | `true` / `false` | Save the figure without opening a window (recommended on headless machines) |
 | `plot.format` | `png` / `pdf` / etc. | Output format |
 | `plot.dpi` | integer | Output resolution |
 
@@ -217,7 +215,7 @@ All pipeline outputs are written to `<output_dir>/pipeline/`:
 The plot stage writes `<output_dir>/plots/excitation_trajectory.png` (or the
 configured extension from `plot.format`).
 
-The PyBullet validator writes outputs to `<output_dir>/validation/<robot_name>/`:
+The PyBullet validator writes outputs to `<output_dir>/validation/`:
 
 - `pybullet_validation.log` -- validation log
 - `pybullet_validation_data.npz` -- replayed trajectory, reference torques,

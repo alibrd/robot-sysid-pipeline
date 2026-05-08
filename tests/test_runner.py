@@ -319,6 +319,25 @@ def test_identification_only_requires_resume_checkpoint(tmp_path, monkeypatch):
         UnifiedRunner(str(cfg_path))._validate_and_prepare()
 
 
+def test_excitation_and_resume_together_are_rejected(tmp_path, monkeypatch):
+    from src.runner import UnifiedRunner
+
+    cfg_path = _make_unified_cfg(
+        tmp_path,
+        urdf_path=URDF_RRBOT,
+        stages={
+            "excitation": True,
+            "identification": True,
+        },
+        resume_from=str(tmp_path / "prev_run"),
+    )
+
+    monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
+
+    with pytest.raises(ValueError, match="resume.from_checkpoint is incompatible"):
+        UnifiedRunner(str(cfg_path))._validate_and_prepare()
+
+
 def test_unified_config_rejects_pipeline_mode_keys_at_top_level(tmp_path):
     from src.runner import UnifiedRunner
 
@@ -411,13 +430,17 @@ def test_output_dir_lays_out_subdirectories(tmp_path, monkeypatch):
     assert Path(ctx["validation_cfg"]["output_dir"]) == (
         tmp_path / "all_outputs" / "validation"
     )
+    for runner_key in ("stages", "resume", "validation_pybullet", "plot", "report", "benchmark"):
+        assert runner_key not in ctx["pipeline_cfg"], (
+            f"Runner-only key '{runner_key}' must not appear in the pipeline config dict"
+        )
 
 
 def test_report_stage_uses_validation_dir(tmp_path, monkeypatch):
     from src.runner import UnifiedRunner
 
     output_dir = tmp_path / "out"
-    validation_dir = output_dir / "validation" / "rrbot_single"
+    validation_dir = output_dir / "validation"
     validation_dir.mkdir(parents=True)
     (validation_dir / "pybullet_validation_summary.json").write_text("{}")
 
@@ -604,14 +627,11 @@ def test_unified_end_to_end_pendulum(tmp_path):
     assert (pipeline_output_dir / "excitation_trajectory.npz").exists()
     assert (pipeline_output_dir / "identification_results.npz").exists()
 
-    # Find the validation subdirectory by robot name.
-    candidates = [c for c in validation_root.iterdir() if c.is_dir()]
-    assert candidates, "Validation should produce at least one robot subdirectory"
-    val_dir = candidates[0]
-    assert (val_dir / "pybullet_validation_summary.json").exists()
-    assert (val_dir / "pybullet_validation_data.npz").exists()
-    assert (val_dir / "pybullet_validation_report.md").exists()
-    assert (val_dir / "pybullet_validation_metrics.csv").exists()
+    # This whole block is skipped when pybullet is absent.
+    assert (validation_root / "pybullet_validation_summary.json").exists()
+    assert (validation_root / "pybullet_validation_data.npz").exists()
+    assert (validation_root / "pybullet_validation_report.md").exists()
+    assert (validation_root / "pybullet_validation_metrics.csv").exists()
     assert (validation_root / "pybullet_validation_benchmark.csv").exists()
     assert (validation_root / "pybullet_validation_benchmark.md").exists()
 
@@ -710,3 +730,24 @@ def test_unified_end_to_end_elbow(tmp_path):
 
     rc = UnifiedRunner(str(cfg_path)).run()
     assert rc == 0
+
+
+if "--run-slow" in sys.argv:
+    @pytest.mark.slow
+    def test_franka_fr3_7dof_urdf_parses_and_config_validates(tmp_path):
+        """FR3 config must load cleanly and produce a valid pipeline config dict."""
+        from src.runner import UnifiedRunner
+
+        config_path = Path(__file__).resolve().parent.parent / "config" / "franka_fr3_7dof.json"
+        runner = UnifiedRunner(str(config_path))
+
+        assert runner.cfg["stages"]["excitation"] is True
+        assert runner.cfg["stages"]["identification"] is True
+        assert runner.cfg["urdf_path"].endswith("FrankaFR3_7DoF.urdf")
+
+        from unittest.mock import patch
+
+        with patch("src.runner._is_module_available", return_value=True):
+            ctx = runner._validate_and_prepare()
+        assert ctx["run_pipeline"] is True
+        assert ctx["run_validation"] is True

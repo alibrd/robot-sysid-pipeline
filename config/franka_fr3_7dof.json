@@ -24,7 +24,6 @@
     },
 
     "plot": {
-        "save_only": false,
         "format": "png",
         "dpi": 150
     },
@@ -83,7 +82,7 @@
     "base_frequency_hz": 0.1,
     "optimize_condition_number": true,
     "optimizer_max_iter": 3000,
-    "trajectory_duration_periods": 5,
+    "trajectory_duration_periods": 30,
     "torque_constraint_method": "none",
     "torque_validation_oversample_factor": 5,
     "torque_constraint": {

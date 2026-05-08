@@ -203,7 +203,6 @@ def test_compute_torques_rejects_joint_order_mismatch(monkeypatch):
                     reason="pybullet is not installed")
 def test_pybullet_validation_runner_pendulum_1dof(tmp_path):
     from src.pybullet_validation import PyBulletValidationRunner
-    from src.urdf_parser import parse_urdf
 
     excitation_path = tmp_path / "excitation.npz"
     config_path = tmp_path / "cfg.json"
@@ -229,12 +228,10 @@ def test_pybullet_validation_runner_pendulum_1dof(tmp_path):
     )
 
     summary = PyBulletValidationRunner(str(config_path)).run()
-    robot_name = parse_urdf(URDF_PENDULUM).name
-
     assert summary["passed"]
-    assert (output_dir / robot_name / "pybullet_validation_summary.json").exists()
-    assert (output_dir / robot_name / "pybullet_validation_data.npz").exists()
-    assert (output_dir / robot_name / "pybullet_validation.log").exists()
+    assert (output_dir / "pybullet_validation_summary.json").exists()
+    assert (output_dir / "pybullet_validation_data.npz").exists()
+    assert (output_dir / "pybullet_validation.log").exists()
 
 
 @pytest.mark.skipif(importlib.util.find_spec("pybullet") is None,
@@ -268,9 +265,9 @@ def test_pybullet_validation_runner_rrbot(tmp_path):
     summary = PyBulletValidationRunner(str(config_path)).run()
 
     assert summary["passed"]
-    assert (output_dir / "single_rrbot" / "pybullet_validation_summary.json").exists()
-    assert (output_dir / "single_rrbot" / "pybullet_validation_data.npz").exists()
-    assert (output_dir / "single_rrbot" / "pybullet_validation.log").exists()
+    assert (output_dir / "pybullet_validation_summary.json").exists()
+    assert (output_dir / "pybullet_validation_data.npz").exists()
+    assert (output_dir / "pybullet_validation.log").exists()
 
 
 def test_pybullet_validation_runner_rejects_gravity_override(tmp_path):

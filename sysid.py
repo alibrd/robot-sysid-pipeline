@@ -33,7 +33,11 @@ def main() -> int:
         "--resume",
         type=str,
         default=None,
-        help="Resume from a previous output directory (overrides resume.from_checkpoint)",
+        help=(
+            "Resume from a previous output directory (overrides resume.from_checkpoint). "
+            "Relative paths are resolved against the current working directory, "
+            "not the config file's location."
+        ),
     )
     parser.add_argument(
         "--dry-run",

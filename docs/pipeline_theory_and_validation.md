@@ -1425,7 +1425,7 @@ sets the artifact layout; it does not change the inverse-dynamics model,
 excitation objective, observation matrix, solver equations, or feasibility
 criteria. For a unified `output_dir`, pipeline artifacts live under
 `<output_dir>/pipeline`, PyBullet validation runs live under
-`<output_dir>/validation/<robot_name>`, benchmark artifacts live under
+`<output_dir>/validation`, benchmark artifacts live under
 `<output_dir>/validation`, and excitation plots live under
 `<output_dir>/plots`.
 

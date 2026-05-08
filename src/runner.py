@@ -61,6 +61,14 @@ _KNOWN_TOP_LEVEL_KEYS = {
 _PIPELINE_SUBDIR = "pipeline"
 _VALIDATION_SUBDIR = "validation"
 _PLOT_SUBDIR = "plots"
+_RUNNER_ONLY_KEYS = frozenset({
+    "stages",
+    "resume",
+    "validation_pybullet",
+    "plot",
+    "report",
+    "benchmark",
+})
 
 _PATH_KEYS_TOP_LEVEL = ("urdf_path", "output_dir")
 
@@ -87,7 +95,12 @@ class UnifiedRunner:
         self.cfg["stages"][stage] = False
 
     def set_resume(self, checkpoint_dir: str) -> None:
-        """Override resume.from_checkpoint with an absolute path (relative to cwd)."""
+        """Override resume.from_checkpoint with a path resolved against the caller's cwd.
+
+        Note: JSON resume.from_checkpoint is resolved against the config file's
+        directory; this method resolves against Path.cwd() instead, matching
+        standard CLI path semantics.
+        """
         if checkpoint_dir in (None, ""):
             self.cfg["resume"]["from_checkpoint"] = None
             return
@@ -225,6 +238,15 @@ class UnifiedRunner:
         resume_path = resume_section.get("from_checkpoint")
 
         # Cross-stage validity rules (§5.4).
+        if resume_path and run_excitation:
+            raise ValueError(
+                "resume.from_checkpoint is incompatible with stages.excitation=true. "
+                "A resume run reuses a saved excitation checkpoint and cannot design a "
+                "new excitation in the same invocation. Either clear resume.from_checkpoint "
+                "for a full fresh run, or set stages.excitation=false to run only "
+                "identification/validation from the saved checkpoint."
+            )
+
         if resume_path and not (run_identification or run_validation):
             raise ValueError(
                 "resume.from_checkpoint is set but no enabled stage can consume it. "
@@ -258,7 +280,7 @@ class UnifiedRunner:
                 # The report stage will use the validation runner's output_dir.
                 report_validation_dir = None
             else:
-                # Look for an existing <output_dir>/validation/<robot> subdirectory.
+                # Look for an existing <output_dir>/validation/ directory.
                 report_validation_dir = self._existing_validation_run_dir()
                 if report_validation_dir is None:
                     raise ValueError(
@@ -364,12 +386,15 @@ class UnifiedRunner:
         # Run the pipeline-config validator so that every existing
         # validation rule still fires (e.g. mutually-exclusive run modes,
         # torque-method preconditions, EL+constrained rejection).
-        return load_config_dict(
+        validated = load_config_dict(
             pipeline_cfg,
             config_path=self.config_path,
             resolve_relative_to=None,
             validate=True,
         )
+        for _key in _RUNNER_ONLY_KEYS:
+            validated.pop(_key, None)
+        return validated
 
     def _validation_cfg_dict(self, *,
                              run_excitation: bool,
@@ -433,19 +458,11 @@ class UnifiedRunner:
         return cp / _PIPELINE_SUBDIR
 
     def _existing_validation_run_dir(self) -> str | None:
-        """Find a single existing validation subdirectory containing a summary."""
+        """Find an existing flat validation directory containing a summary."""
         validation_root = Path(self.cfg["output_dir"]) / _VALIDATION_SUBDIR
-        if not validation_root.exists():
-            return None
-        candidates = [
-            child for child in validation_root.iterdir()
-            if child.is_dir() and (child / "pybullet_validation_summary.json").exists()
-        ]
-        if not candidates:
-            return None
-        # Prefer the most recently modified directory if multiple exist.
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return str(candidates[0])
+        if (validation_root / "pybullet_validation_summary.json").exists():
+            return str(validation_root)
+        return None
 
 
 # ----------------------------------------------------------------------
