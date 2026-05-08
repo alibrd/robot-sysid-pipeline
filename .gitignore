@@ -2,17 +2,13 @@
 
 !/.gitignore
 !/README.md
-!/run_pipeline.py
-!/run_pybullet_validation_benchmark.py
-!/run_pybullet_validation_report.py
-!/run_pybullet_validation.py
-!/run_workflow.py
+!/sysid.py
 
 !/config/
 /config/*
 !/config/default_config.json
 !/config/default_pybullet_validation_config.json
-!/config/default_workflow_config.json
+!/config/franka_fr3_7dof.json
 
 !/docs/
 /docs/*

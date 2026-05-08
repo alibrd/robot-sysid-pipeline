@@ -11,178 +11,103 @@ relevant literature, and maps each equation to implementation and tests.
 
 ## Quick start
 
-```bash
-python run_pipeline.py config/my_robot.json
-```
-
-To visualize the excitation trajectory and torque limits from a pipeline output
-directory:
+The repository exposes a single entry point that runs every stage from one JSON
+configuration file:
 
 ```bash
-python plot_excitation.py outputs/my_run/          # interactive window + PNG
-python plot_excitation.py outputs/my_run/ --save   # PNG only (headless)
+python sysid.py config/my_robot.json
 ```
 
-For standalone PyBullet torque validation against a saved excitation artifact:
+Use `--only`, `--skip`, `--resume`, or `--dry-run` to control execution:
 
 ```bash
-python run_pybullet_validation.py config/my_pybullet_validation.json
+# Generate and save an excitation checkpoint, but stop before identification.
+python sysid.py config/my_robot.json --only excitation
+
+# Resume identification from a previous unified output directory.
+python sysid.py config/my_robot.json --resume tmp_output/elbow_3dof
+
+# Validate an existing excitation artifact from a previous unified output.
+python sysid.py config/my_robot.json --only validation_pybullet --resume tmp_output/elbow_3dof
+
+# Print the merged config without running anything.
+python sysid.py config/my_robot.json --dry-run
 ```
 
-To export a Markdown summary, CSV table, and per-joint torque/error plots from
-an existing validation run:
+## Stages
 
-```bash
-python run_pybullet_validation_report.py tmp_output/pybullet_validation/<robot_name>
+The unified config has a `stages` block with six boolean flags:
+
+| Flag | What it does |
+|---|---|
+| `excitation` | Run pipeline Stages 1-6 and save the excitation trajectory; excitation-only runs also save a checkpoint |
+| `identification` | Run pipeline Stages 7-11 (observation matrix, base parameters, solver, feasibility, results) |
+| `validation_pybullet` | Replay the excitation in PyBullet `DIRECT` mode and compare torques against the Newton-Euler regressor |
+| `report` | Export a Markdown summary, CSV table, and per-joint plots from a validation run |
+| `benchmark` | Aggregate every validation run under `<output_dir>/validation` into a benchmark CSV/Markdown table |
+| `plot` | Render `excitation_trajectory.png` from `<output_dir>/pipeline/excitation_trajectory.npz` |
+
+Common invocations map directly onto these flags:
+
+- **Full pipeline** - `stages.excitation=true` and `stages.identification=true`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
+- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves `checkpoint.npz` and `checkpoint_config.json` under `<output_dir>/pipeline/`.
+- **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11.
+- **Validate an existing excitation** - `stages.validation_pybullet=true`, `stages.excitation=false`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
+- **Plot results** - `stages.plot=true`. Reads `<output_dir>/pipeline/excitation_trajectory.npz` and writes `<output_dir>/plots/excitation_trajectory.png`. Combine with any stage that produces or already has that pipeline artifact.
+- **Compare with PyBullet after a fresh run** - `stages.validation_pybullet=true` with `stages.excitation=true`. The validation stage consumes the excitation artifact produced in the same invocation.
+
+The unified runner translates these stage choices into the underlying pipeline's
+excitation-only and checkpoint-resume controls. Identification without
+excitation requires `resume.from_checkpoint`, so an identification-only stage
+cannot accidentally run a fresh full pipeline.
+
+## Output layout
+
+For one unified `output_dir`:
+
+```
+<output_dir>/
+  pipeline/                       # pipeline class output
+    pipeline.log
+    excitation_trajectory.npz
+    identification_results.npz
+    results_summary.json
+    [checkpoint.npz, checkpoint_config.json]   # excitation-only runs
+  validation/                     # PyBullet validation output (per-robot subdir)
+    <robot_name>/
+      pybullet_validation_summary.json
+      pybullet_validation_data.npz
+      [report artifacts when the report stage is enabled]
+    pybullet_validation_benchmark.csv
+    pybullet_validation_benchmark.md
+  plots/                          # plot stage output
+    excitation_trajectory.png
 ```
 
-To aggregate multiple validation runs into one benchmark CSV/Markdown table:
+This layout is fixed. Point `output_dir` at a different absolute path if you want a flat directory structure.
 
-```bash
-python run_pybullet_validation_benchmark.py tmp_output/pybullet_validation
-```
+## Unified config
 
-To automate pipeline execution plus optional validation/report/benchmark stages
-from one orchestration config:
-
-```bash
-python run_workflow.py config/my_workflow.json
-```
-
-## Pipeline modes
-
-The pipeline supports three run modes, all selectable from the JSON config file.
-Two optional config fields control the mode: `excitation_only` (boolean) and
-`checkpoint_dir` (path string or `null`). When neither is set, the pipeline
-runs end-to-end. These fields are mutually exclusive — setting both is an error.
-
-### Mode 1: Full pipeline (Stages 1–11)
-
-This is the default. The pipeline runs all stages from URDF parsing through
-identification and saves the final results. The workflow runner
-(`run_workflow.py`) can orchestrate this mode together with PyBullet validation,
-report generation, and benchmarking.
-
-```json
-{
-  "urdf_path": "path/to/robot.urdf",
-  "output_dir": "output/full_run"
-}
-```
-
-```bash
-python run_pipeline.py config/my_robot.json
-python run_workflow.py config/my_workflow.json
-```
-
-### Mode 2: Resume from checkpoint (Stages 1–4 reconstructed, then 7–11)
-
-Set `checkpoint_dir` to the output directory of a previous excitation-only run.
-The pipeline reconstructs the regressor from the URDF (Stages 1–4, which take
-less than a second), loads the excitation trajectory and data from the
-checkpoint, then runs identification through to results (Stages 7–11). The
-workflow runner supports this mode as well.
-
-```json
-{
-  "urdf_path": "path/to/robot.urdf",
-  "output_dir": "output/identification_phase",
-  "checkpoint_dir": "output/excitation_phase"
-}
-```
-
-```bash
-python run_pipeline.py config/my_robot_resume.json
-# or override on CLI:
-python run_pipeline.py config/my_robot.json --checkpoint-dir output/excitation_phase
-```
-
-The `checkpoint_dir` path is resolved relative to the config file location,
-just like `urdf_path`. When using the workflow runner, set
-`pipeline.checkpoint_dir` in the workflow config to inject this into the
-pipeline config.
-
-### Mode 3: Excitation only (Stages 1–6)
-
-Set `excitation_only` to `true`. The pipeline runs through excitation
-optimisation and data generation, saves a checkpoint (`checkpoint.npz` and
-`checkpoint_config.json`), then stops. The checkpoint contains the optimised
-Fourier trajectory parameters, the generated trajectory data, and the nominal
-parameter vector used during design. The workflow runner does not support this
-mode because there are no identification results to validate.
-
-```json
-{
-  "urdf_path": "path/to/robot.urdf",
-  "output_dir": "output/excitation_phase",
-  "excitation_only": true
-}
-```
-
-```bash
-python run_pipeline.py config/my_robot_excitation.json
-# or override on CLI:
-python run_pipeline.py config/my_robot.json --excitation-only
-```
-
-### How mode selection works in the code
-
-The mode is determined entirely from the merged config dictionary inside
-`SystemIdentificationPipeline.run()`. The logic is:
-
-1. If `checkpoint_dir` is set (non-null) → **Mode 2** (resume). Load
-   checkpoint, reconstruct Stages 1–4 from the URDF, then run Stages 7–11.
-2. Else if `excitation_only` is `true` → **Mode 3** (excitation only). Run
-   Stages 1–6, save checkpoint, stop.
-3. Otherwise → **Mode 1** (full). Run all stages end-to-end.
-
-The `config_loader.py` validation rejects configs where both fields are set.
-CLI arguments (`--excitation-only`, `--checkpoint-dir`) override the config
-fields after loading. The workflow runner (`workflow.py`) injects
-`pipeline.excitation_only` and `pipeline.checkpoint_dir` from the workflow
-config into the pipeline config before constructing the pipeline object.
-
-### Checkpoint file contents
-
-The `checkpoint.npz` file produced by Mode 3 contains:
-
-- Excitation result: optimised Fourier coefficients (`exc_params`), harmonic
-  frequencies (`exc_freqs`), initial joint positions (`exc_q0`), condition
-  number cost (`exc_cost`), basis type, phase optimisation flag, torque
-  constraint method
-- Trajectory data: `q_data`, `dq_data`, `ddq_data`, `tau_data` arrays and
-  sampling frequency `data_fs`
-- The nominal parameter vector used during excitation design
-  (`nominal_params_used`)
-- Sequential redesign history (if applicable)
-
-A `checkpoint_config.json` file is saved alongside it, capturing the full
-merged pipeline config at the time of the excitation run. Mode 2 does not
-currently validate config compatibility between the checkpoint and the resume
-config — the user is responsible for using consistent settings (same URDF,
-method, friction model).
-
-## JSON configuration
-
-Copy `config/default_config.json` and fill in the fields. Key settings:
+Copy `config/default_config.json` and fill in the fields. The most important keys:
 
 | Field | Values | Description |
 |---|---|---|
 | `urdf_path` | file path | Path to the robot URDF or xacro file |
-| `excitation_only` | `true` / `false` | Stop after Stage 6 and save checkpoint (default `false`) |
-| `checkpoint_dir` | directory path or `null` | Resume from a previous excitation-only output directory (default `null`) |
+| `output_dir` | directory | Root for all stage outputs; subdirectories `pipeline/`, `validation/`, and `plots/` are created automatically |
+| `stages.*` | booleans | Stage selection (see above) |
+| `resume.from_checkpoint` | path or `null` | Reuse the pipeline artifact directory from a previous unified output |
 | `method` | `newton_euler` / `euler_lagrange` | Dynamics formulation |
 | `excitation.basis_functions` | `cosine` / `sine` / `both` | Fourier basis |
 | `excitation.optimize_phase` | `true` / `false` | Phase optimisation (only used with `both`) |
-| `excitation.optimize_condition_number` | `true` / `false` | Minimize cond(Y^T Y) |
-| `excitation.num_harmonics` | integer >= 1 | Number of Fourier harmonics (default 5) |
-| `excitation.base_frequency_hz` | float > 0 | Fundamental frequency (default 0.2 Hz) |
+| `excitation.optimize_condition_number` | `true` / `false` | Minimize `cond(Y^T Y)` |
+| `excitation.num_harmonics` | integer >= 1 | Number of Fourier harmonics |
+| `excitation.base_frequency_hz` | float > 0 | Fundamental frequency |
 | `excitation.torque_constraint_method` | `none` / `nominal_hard` / `soft_penalty` / `robust_box` / `chance` / `actuator_envelope` / `sequential_redesign` | Torque-limited excitation mode |
 | `excitation.torque_validation_oversample_factor` | integer >= 1 | Dense replay factor for torque validation and oversampled constraint checks |
-| `excitation.torque_constraint.*` | object | Method-specific torque settings such as uncertainty, envelope, penalty, guard-band, and redesign options |
+| `excitation.torque_constraint.*` | object | Method-specific torque settings (uncertainty, envelope, penalty, guard-band, redesign) |
 | `friction.model` | `none` / `viscous` / `coulomb` / `viscous_coulomb` | Friction model |
 | `identification.solver` | `ols` / `wls` / `bounded_ls` | Parameter solver |
-| `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement. `lmi` uses SLSQP with pseudo-inertia eigenvalue constraints; `cholesky` reparameterises $J = LL^\top$ guaranteeing PSD by construction (L-BFGS-B). Both require `method=newton_euler` |
+| `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement (requires `method=newton_euler`) |
 | `identification.data_file` | file path or `null` | External measurement data (`.npz`) |
 | `filtering.enabled` | `true` / `false` | Zero-phase Butterworth signal filtering |
 | `downsampling.frequency_hz` | float | Downsample frequency (0 = disabled) |
@@ -190,6 +115,15 @@ Copy `config/default_config.json` and fill in the fields. Key settings:
 | `joint_limits.velocity` | `[[lo,hi], ...]` or `null` | Joint velocity limits |
 | `joint_limits.acceleration` | `[[lo,hi], ...]` or `null` | Joint acceleration limits |
 | `joint_limits.torque` | `[[lo,hi], ...]` or `null` | Fallback torque limits when the URDF lacks joint effort limits |
+| `validation_pybullet.sample_rate_hz` | float | PyBullet replay sample rate (0 = auto) |
+| `validation_pybullet.gravity` | `[gx, gy, gz]` | Gravity vector for PyBullet; must match the Newton-Euler gravity constant |
+| `validation_pybullet.use_fixed_base` | `true` / `false` | Fix the base when loading the URDF in PyBullet |
+| `validation_pybullet.joint_name_order` | list or `null` | Optional joint-order override |
+| `validation_pybullet.comparison.tolerance_abs` | float | Absolute torque tolerance |
+| `validation_pybullet.comparison.tolerance_normalized_rms` | float | Normalised RMS tolerance |
+| `plot.save_only` | `true` / `false` | Save the figure without opening a window (recommended on headless machines) |
+| `plot.format` | `png` / `pdf` / etc. | Output format |
+| `plot.dpi` | integer | Output resolution |
 
 The pipeline uses the literature-standard SLSQP excitation formulation. The
 method-specific `excitation.torque_constraint.*` keys are:
@@ -209,13 +143,11 @@ the implemented margin formula rather than a direct two-sided central-coverage
 percentage.
 
 `nominal_hard`, `robust_box`, `chance`, and `actuator_envelope` add hard
-torque constraints to the SLSQP path. `soft_penalty`
-adds a smooth violation penalty to the objective instead, and
-`sequential_redesign` runs an outer loop that repeatedly redesigns with
-`nominal_hard`.
-
-`sequential_redesign` is further restricted to `method=newton_euler` and
-synthetic-data runs (`identification.data_file=null`).
+torque constraints to the SLSQP path. `soft_penalty` adds a smooth violation
+penalty to the objective instead, and `sequential_redesign` runs an outer loop
+that repeatedly redesigns with `nominal_hard`. `sequential_redesign` is further
+restricted to `method=newton_euler` and synthetic-data runs
+(`identification.data_file=null`).
 
 ## Torque limit sourcing
 
@@ -236,7 +168,7 @@ torque limits with this precedence:
 4. **Regressor setup** -- Newton-Euler (numeric recursive) or Euler-Lagrange
    (symbolic, cached as SymPy, re-lambdified on load)
 5. **Excitation design** -- Fourier trajectory optimisation with the
-   literature-standard SLSQP formulation (log₁₀ condition number cost). It
+   literature-standard SLSQP formulation (`log10` condition number cost). It
    enforces joint-space limits with drift-aware sine amplitude bounds and
    can additionally apply torque-limited excitation. Cartesian/workspace
    constraints are not implemented
@@ -260,16 +192,14 @@ torque limits with this precedence:
 
 ## Output files
 
-All outputs are written to `output_dir`:
+All pipeline outputs are written to `<output_dir>/pipeline/`:
 
 - `pipeline.log` -- detailed log of every stage
 - `excitation_trajectory.npz` -- optimised trajectory parameters (`params`,
   `freqs`, `q0`, `basis`, `optimize_phase`, `cost`) plus the dense time series
   (`t`, `q`, `dq`, `ddq`, shape `(nDoF, N)`) and joint limits (`q_lim`,
-  `dq_lim`, `ddq_lim`, shape `(nDoF, 2)`). Pass the output directory to
-  `plot_excitation.py` to visualize all joint and torque trajectories
-- `excitation_trajectory.png` -- trajectory plot written by `plot_excitation.py`
-  (not produced by the pipeline itself)
+  `dq_lim`, `ddq_lim`, shape `(nDoF, 2)`). The `plot` stage renders this file
+  to a PNG
 - `torque_limit_validation.npz` -- dense replay of torque limits, torque traces,
   normalized torque ratios, and method metadata when torque-limited excitation
   is enabled; hard methods also store design margins and chance quantiles when
@@ -280,12 +210,14 @@ All outputs are written to `output_dir`:
   flags, max normalized torque ratio, worst joint/time, and redesign history
   when applicable
 - `checkpoint.npz` -- serialized excitation and trajectory data for pipeline
-  resume (only produced by `excitation_only` mode)
+  resume (only produced by excitation-only runs)
 - `checkpoint_config.json` -- snapshot of the merged pipeline config at the time
-  of the excitation-only run (only produced by `excitation_only` mode)
+  of the excitation-only run
 
-The standalone PyBullet validator writes outputs to
-`<output_dir>/<robot_name>/`:
+The plot stage writes `<output_dir>/plots/excitation_trajectory.png` (or the
+configured extension from `plot.format`).
+
+The PyBullet validator writes outputs to `<output_dir>/validation/<robot_name>/`:
 
 - `pybullet_validation.log` -- validation log
 - `pybullet_validation_data.npz` -- replayed trajectory, reference torques,
@@ -309,21 +241,14 @@ exporter writes:
 - Python >= 3.9
 - NumPy, SciPy, SymPy
 - pytest (for testing)
-- `pybullet` (optional, only for standalone simulator validation)
+- `pybullet` (optional, only for the validation stage)
+- `matplotlib` (optional, required by the `plot` and `report` stages)
 
-Install the optional validation dependency with:
-
-```bash
-pip install pybullet
-```
-
-Install `matplotlib` for trajectory visualization and report export plots:
+Install the optional dependencies with:
 
 ```bash
-pip install matplotlib
+pip install pybullet matplotlib
 ```
-
-This is required by `plot_excitation.py` and `run_pybullet_validation_report.py`.
 
 ## Testing
 
@@ -349,31 +274,7 @@ Excitation-specific coverage includes:
 - `tests/test_torque_constraints_slow.py` for slower method comparisons,
   oversampled replay checks, and chance-constraint validation
 
-## PyBullet validation config
-
-Use `config/default_pybullet_validation_config.json` as the template for the
-standalone validation workflow. The validator depends on the excitation artifact
-contract written by the main pipeline, specifically these fields in
-`excitation_trajectory.npz`:
-
-- `params`
-- `freqs`
-- `q0`
-- `basis`
-- `optimize_phase`
-
-The same pipeline artifact also stores sampled trajectory arrays and joint-limit
-arrays for inspection and downstream tooling. Validation accepts URDF or xacro
-robot paths; xacro inputs are resolved through the `xacro` CLI into a temporary
-URDF before PyBullet loads them. Vendored FingerEdu mesh paths that use
-`package://robot_properties_fingers/meshes` are rewritten to the local test
-asset directory when those assets are present.
-
-The validator replays the excitation with the existing Fourier trajectory code,
-computes reference torques with the Newton-Euler regressor, computes PyBullet
-inverse-dynamics torques in `DIRECT` mode, and compares both sample-by-sample.
-
-### What validation proves
+## What validation proves
 
 - **Demonstrates**: regressor correctness, URDF-parsing consistency,
   parameter-packing consistency
@@ -387,96 +288,6 @@ replay, and identification -- is implemented correctly. Neither the validation
 nor the smoke tests alone are sufficient to prove identification accuracy on
 real measured data.
 
-## Workflow automation config
-
-Use `config/default_workflow_config.json` as the template for the optional
-workflow runner. This orchestration layer keeps the main pipeline independent
-from PyBullet while still allowing one-command automation.
-
-The workflow config supports:
-
-- `run_pipeline`
-- `run_validation`
-- `run_report`
-- `run_benchmark`
-- `allow_missing_optional_dependencies`
-- `output_root`
-- `pipeline.config_path`
-- `pipeline.excitation_only`
-- `pipeline.checkpoint_dir`
-- `validation.config_path`
-- `validation.auto_from_pipeline`
-- `validation.use_external_artifacts`
-- `report.validation_dir`
-- `benchmark.validation_root`
-
-When both `run_pipeline=true` and `run_validation=true`, the default behavior is
-`validation.auto_from_pipeline=true`. In that mode, the workflow runner derives:
-
-- `validation.urdf_path` from the pipeline config
-- `validation.excitation_file` from `<pipeline_output_dir>/excitation_trajectory.npz`
-- `validation.base_frequency_hz` from the pipeline excitation config
-- `validation.trajectory_duration_periods` from the pipeline excitation config
-
-This means users can keep pipeline and validation configs separate without
-manually duplicating the URDF/excitation linkage in the common case.
-
-If `output_root` is set, it overrides stage output locations as follows:
-
-- pipeline output: `<output_root>/pipeline/<pipeline_config_stem>`
-- validation output root: `<output_root>/validation`
-- benchmark output root: `<output_root>/validation`
-
-The workflow runner performs fail-fast preflight checks before execution. For
-example, it rejects missing required stage inputs, mismatched pipeline/validation
-URDFs, and validation runs that point to a different excitation artifact than
-the just-run pipeline output unless `validation.use_external_artifacts=true`.
-The main pipeline also performs an excitation preflight after joint-limit
-resolution, including rejecting long-horizon `basis_functions="sine"` setups
-whose `lambda_1` drift cap would collapse the usable amplitudes. For long
-trajectories, prefer `basis_functions="both"` with `optimize_phase=false`.
-
-The test suite (`tests/test_pipeline.py`) verifies:
-
-- **URDF parsing** -- chain extraction, `Tw_0` base transform, topological
-  ordering
-- **Trajectory boundary conditions** -- `q(0) = q0`, `dq(0) = 0` for all
-  basis/phase combinations; sine integer-period endpoint guarantee; config
-  rejection of non-integer sine periods; EL plus constrained identification
-  rejected; `cholesky` accepted as a distinct feasibility method
-- **NE / EL equivalence** -- Newton-Euler and Euler-Lagrange regressors produce
-  matching torques (default RRBot plus Drake pendulum / FingerEdu fixtures)
-- **Base parameter reduction** -- observation equation preserved after QR
-  reduction; `pinv(P)` reconstruction consistency
-- **Filtering** -- passthrough when disabled; lowpass attenuation of
-  high-frequency components
-- **Pseudo-inertia feasibility** -- physically valid params pass; negative mass
-  fails; large-first-moment-tiny-mass case is correctly detected as infeasible
-  via pseudo-inertia; projection produces PSD pseudo-inertia
-- **Sample sufficiency** -- insufficient samples raise an error
-- **End-to-end pipeline** -- default smoke tests use RRBot
-  (`tests/assets/RRBot_single.urdf`); additional reference coverage uses
-  `DrakePendulum_1DoF.urdf`, `FingerEdu_3DoF.xacro`, and
-  `ElbowManipulator_3DoF.urdf` for 1-DoF, xacro-based 3-DoF, and spatial
-  3-DoF checks
-- **Excitation preflight** -- long-horizon sine-only setups are rejected before
-  optimisation when the `lambda_1` drift cap collapses usable amplitudes
-- **Torque-limited excitation** -- torque limit sourcing, per-method design
-  math, dense replay validation, and end-to-end constrained runs are covered in
-  the dedicated torque suites
-
-The documentation-linked verification layer lives in:
-
-- `tests/test_pipeline_theory.py`: default standalone theory/evidence checks
-- `tests/test_pipeline_theory_slow.py`: optional slower symbolic and
-  conditioning checks
-- `tests/test_excitation_x0.py`: excitation preflight and initial-guess
-  regression tests
-- `tests/test_torque_constraints.py`: fast torque-limited excitation and replay
-  tests
-- `tests/test_torque_constraints_slow.py`: slower torque-method comparison and
-  oversampled replay tests
-
 ## Module overview
 
 | Module | Purpose |
@@ -486,7 +297,7 @@ The documentation-linked verification layer lives in:
 | `dynamics_newton_euler.py` | Numeric NE recursive regressor `Y(q, dq, ddq)` |
 | `dynamics_euler_lagrange.py` | Symbolic EL regressor via the Lagrangian (cached to pickle) |
 | `trajectory.py` | Fourier-basis trajectory generation with lambda correction terms and drift-aware sine bounds |
-| `excitation.py` | Trajectory parameter optimisation (log₁₀ condition number), preflight checks, and SLSQP dispatch |
+| `excitation.py` | Trajectory parameter optimisation (`log10` condition number), preflight checks, and SLSQP dispatch |
 | `torque_constraints.py` | Torque-limit design helpers, replay validation, and torque summaries |
 | `observation_matrix.py` | Stack per-sample regressors into the observation matrix |
 | `base_parameters.py` | QR-based column-pivoted reduction to identifiable parameters |
@@ -494,9 +305,13 @@ The documentation-linked verification layer lives in:
 | `feasibility.py` | Post-hoc physical feasibility checks, LMI projection, and Cholesky helpers |
 | `filtering.py` | Zero-phase Butterworth filtering and downsampling |
 | `friction.py` | Friction model parameter augmentation |
-| `pipeline.py` | Main orchestrator tying all stages together |
+| `pipeline.py` | Main pipeline orchestrator tying all stages together |
+| `pybullet_validation.py` | Standalone PyBullet torque comparison runner |
+| `pybullet_validation_report.py` | Markdown / CSV / per-joint plot exporter for a validation run |
+| `pybullet_validation_benchmark.py` | Multi-run benchmark aggregator |
+| `runner.py` | Unified single-config orchestrator (`UnifiedRunner`) |
+| `plot_runner.py` | Minimal matplotlib renderer for the excitation trajectory |
 | `config_loader.py` | JSON config loading with defaults and validation |
-| `workflow.py` | Optional orchestration across pipeline, validation, report, benchmark |
 | `math_utils.py` | Rotation matrices, skew-symmetric operators, constants |
 
 ## Limitations and future work

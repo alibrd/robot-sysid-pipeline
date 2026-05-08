@@ -1,0 +1,116 @@
+{
+  "urdf_path": "../tests/assets/FrankaFR3_7DoF.urdf",
+  "output_dir": "../tmp_output/franka_fr3_7dof",
+  "method": "newton_euler",
+
+  "stages": {
+        "excitation": true,
+        "identification": true,
+        "validation_pybullet": true,
+        "report": true,
+        "benchmark": false,
+        "plot": true
+    },
+
+    "validation_pybullet": {
+        "sample_rate_hz": 0,
+        "gravity": [0.0, 0.0, -9.80665],
+        "use_fixed_base": true,
+        "joint_name_order": null,
+        "comparison": {
+            "tolerance_abs": 0.01,
+            "tolerance_normalized_rms": 0.01
+        }
+    },
+
+    "plot": {
+        "save_only": false,
+        "format": "png",
+        "dpi": 150
+    },
+
+  "joint_limits": {
+    "position": [
+      [-2.9007, 2.9007],
+      [-1.8361, 1.8361],
+      [-2.9007, 2.9007],
+      [-3.077, -0.1169],
+      [-2.8763, 2.8763],
+      [0.4398, 4.6216],
+      [-3.0508, 3.0508]
+    ],
+    "velocity": [
+      [-2.62, 2.62],
+      [-2.62, 2.62],
+      [-2.62, 2.62],
+      [-2.62, 2.62],
+      [-5.26, 5.26],
+      [-4.18, 4.18],
+      [-5.26, 5.26]
+    ],
+    "acceleration": [
+      [-10.0, 10.0],
+      [-10.0, 10.0],
+      [-10.0, 10.0],
+      [-10.0, 10.0],
+      [-10.0, 10.0],
+      [-10.0, 10.0],
+      [-10.0, 10.0]
+    ],
+    "torque": [
+      [-87.0, 87.0],
+      [-87.0, 87.0],
+      [-87.0, 87.0],
+      [-87.0, 87.0],
+      [-12.0, 12.0],
+      [-12.0, 12.0],
+      [-12.0, 12.0]
+    ]
+  },
+  "friction": {
+    "model": "none"
+  },
+  "identification": {
+    "solver": "ols",
+    "parameter_bounds": false,
+    "feasibility_method": "cholesky",
+    "data_file": null
+  },
+  "excitation": {
+    "basis_functions": "both",
+    "optimize_phase": false,
+    "num_harmonics": 5,
+    "base_frequency_hz": 0.1,
+    "optimize_condition_number": true,
+    "optimizer_max_iter": 3000,
+    "trajectory_duration_periods": 5,
+    "torque_constraint_method": "none",
+    "torque_validation_oversample_factor": 5,
+    "torque_constraint": {
+      "strict_validation": true,
+      "soft_penalty_weight": 100.0,
+      "soft_penalty_smoothing": 0.01,
+      "relative_uncertainty": 0.1,
+      "absolute_uncertainty_floor": 0.001,
+      "chance_confidence": 0.99,
+      "relative_stddev": 0.05,
+      "absolute_stddev_floor": 0.001,
+      "envelope_type": "constant",
+      "speed_linear_slope": 0.25,
+      "velocity_reference": 1.0,
+      "min_scale": 0.5,
+      "max_scale": 1.5,
+      "rms_limit_ratio": null,
+      "max_iterations": 3,
+      "convergence_tol": 0.01
+    }
+  },
+  "filtering": {
+    "enabled": false,
+    "cutoff_frequency_hz": 10.0,
+    "filter_order": 4
+  },
+  "downsampling": {
+    "frequency_hz": 0
+  }
+}

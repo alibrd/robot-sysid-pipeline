@@ -1,4 +1,4 @@
-"""Shared configuration utilities used by config_loader, pybullet_validation, and workflow."""
+"""Shared configuration utilities used by config_loader, pybullet_validation, and runner."""
 from copy import deepcopy
 from pathlib import Path
 

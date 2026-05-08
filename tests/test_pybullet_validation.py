@@ -468,3 +468,53 @@ def test_replay_excitation_rejects_frequency_mismatch(tmp_path):
         replay_excitation_trajectory(
             str(excitation_path), 0.3, 1.0, 200.0
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Validation config loader path resolution
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_validation_config_loader_resolves_relative_paths(tmp_path):
+    """PyBullet validation config loader must resolve URDF, excitation, output_dir."""
+    import shutil
+    from src.pybullet_validation import load_pybullet_validation_config
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    urdf_copy = tmp_path / "assets" / "DrakePendulum_1DoF.urdf"
+    urdf_copy.parent.mkdir(parents=True)
+    shutil.copy2(URDF_PENDULUM, urdf_copy)
+
+    excitation_file = tmp_path / "data" / "excitation.npz"
+    excitation_file.parent.mkdir(parents=True)
+    np.savez(
+        str(excitation_file),
+        params=np.asarray([0.05], dtype=float),
+        freqs=np.asarray([0.5], dtype=float),
+        q0=np.asarray([0.0], dtype=float),
+        basis=np.array("cosine"),
+        optimize_phase=np.array(False),
+    )
+
+    config_path = config_dir / "validation.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "urdf_path": "../assets/DrakePendulum_1DoF.urdf",
+                "excitation_file": "../data/excitation.npz",
+                "output_dir": "../validation_output",
+                "base_frequency_hz": 0.5,
+                "trajectory_duration_periods": 2,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_pybullet_validation_config(str(config_path))
+
+    assert cfg["urdf_path"] == str(
+        (config_dir / "../assets/DrakePendulum_1DoF.urdf").resolve()
+    )
+    assert cfg["excitation_file"] == str(excitation_file.resolve())
+    assert cfg["output_dir"] == str((config_dir / "../validation_output").resolve())

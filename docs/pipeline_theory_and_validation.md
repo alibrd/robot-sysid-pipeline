@@ -39,6 +39,7 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 | Constrained identification with pseudo-inertia PSD (LMI) | Supported for `newton_euler` only |
 | Cholesky-factored feasibility reparameterization | Supported for `newton_euler` only |
 | Torque-limited excitation (`nominal_hard`, `soft_penalty`, `robust_box`, `chance`, `actuator_envelope`, `sequential_redesign`) | Supported |
+| Unified single-config runner for pipeline, validation, report, benchmark, and plot stages | Supported |
 | Cartesian / workspace excitation constraints | **Not implemented** |
 | Automatic differentiation from raw $q$ to $\dot q,\ddot q$ | **Not implemented**; external data must provide `dq` and `ddq` |
 
@@ -48,6 +49,7 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 - The optional deeper verification suite is in [`tests/test_pipeline_theory_slow.py`](../tests/test_pipeline_theory_slow.py) and is enabled with `--run-slow`.
 - Excitation preflight regressions live in [`tests/test_excitation_x0.py`](../tests/test_excitation_x0.py).
 - Torque-limited excitation regressions live in [`tests/test_torque_constraints.py`](../tests/test_torque_constraints.py) and [`tests/test_torque_constraints_slow.py`](../tests/test_torque_constraints_slow.py).
+- Unified runner regressions live in [`tests/test_runner.py`](../tests/test_runner.py).
 
 Run all theory verification tests:
 
@@ -128,9 +130,9 @@ STAGE 1: Additional URDF fixtures remain supported
 - Elbow manipulator parsing checks cover a spatial 3-DoF RRR fixture with
   expected joint names, axes, masses, identity `Tw_0`, Newton-Euler pipeline
   smoke coverage, and base-parameter count plausibility:
-  [`tests/test_pipeline.py`](../tests/test_pipeline.py). A slow workflow check
-  exercises the same fixture through pipeline and PyBullet validation:
-  [`tests/test_workflow.py`](../tests/test_workflow.py).
+  [`tests/test_pipeline.py`](../tests/test_pipeline.py). A slow unified-runner
+  check exercises the same fixture through pipeline and PyBullet validation:
+  [`tests/test_runner.py`](../tests/test_runner.py).
 
 ## Stage 2. Resolve Joint Limits, Resolve Torque Limits When Needed, and Fail Early
 
@@ -1416,6 +1418,17 @@ The pipeline writes:
 
 These are orchestrated from [`src/pipeline.py`](../src/pipeline.py), with logging configured in [`src/pipeline_logger.py`](../src/pipeline_logger.py).
 
+The unified entry point [`sysid.py`](../sysid.py) uses
+[`src/runner.py`](../src/runner.py) to translate one JSON config into the
+pipeline, PyBullet validation, report, benchmark, and plot stages. This runner
+sets the artifact layout; it does not change the inverse-dynamics model,
+excitation objective, observation matrix, solver equations, or feasibility
+criteria. For a unified `output_dir`, pipeline artifacts live under
+`<output_dir>/pipeline`, PyBullet validation runs live under
+`<output_dir>/validation/<robot_name>`, benchmark artifacts live under
+`<output_dir>/validation`, and excitation plots live under
+`<output_dir>/plots`.
+
 The excitation artifact stores the Fourier replay contract (`params`, `freqs`,
 `q0`, `basis`, `optimize_phase`, `cost`) plus sampled time-series arrays
 (`t`, `q`, `dq`, `ddq`) and joint-limit arrays (`q_lim`, `dq_lim`, `ddq_lim`).
@@ -1527,7 +1540,7 @@ tests/test_torque_constraints.py::test_stage_7_to_12_shared_torque_harness_runs_
 | Stage | Main claim | Code | Verification |
 |---|---|---|---|
 | 1 | Standalone URDF parsing and serial-chain extraction work | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_1_and_3_parser_and_kinematics_build_standalone_model` |
-| 1 | Reference fixtures cover Drake pendulum, FingerEdu xacro, and spatial Elbow manipulator models | [`src/urdf_parser.py`](../src/urdf_parser.py), [`src/pipeline.py`](../src/pipeline.py), [`src/workflow.py`](../src/workflow.py) | `test_stage_1_reference_models_remain_supported`, `TestElbowManipulator3DoF`, `test_elbow_workflow_end_to_end` |
+| 1 | Reference fixtures cover Drake pendulum, FingerEdu xacro, and spatial Elbow manipulator models | [`src/urdf_parser.py`](../src/urdf_parser.py), [`src/pipeline.py`](../src/pipeline.py), [`src/runner.py`](../src/runner.py) | `test_stage_1_reference_models_remain_supported`, `TestElbowManipulator3DoF`, `test_unified_end_to_end_elbow` |
 | 2 | Missing limits are rejected clearly | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_2_joint_limit_extraction_rejects_missing_json_overrides` |
 | 2 | Torque limits use URDF effort first, JSON fallback second, and fail clearly when required | [`src/urdf_parser.py`](../src/urdf_parser.py) | `test_stage_2_torque_limit_precedence_urdf_then_json_then_error` |
 | 3 | The inertial parameter vector matches the URDF data and parallel-axis shift | [`src/kinematics.py`](../src/kinematics.py) | `test_stage_1_and_3_parser_and_kinematics_build_standalone_model` |

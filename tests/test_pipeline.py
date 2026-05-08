@@ -706,3 +706,44 @@ class TestPipelineSmoke:
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),
                           allow_pickle=True)
         assert results["residual"] < 1e-6
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Pipeline config loader path resolution
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_pipeline_config_loader_resolves_relative_paths(tmp_path):
+    """Pipeline config loader must resolve URDF, output_dir, and data_file."""
+    import shutil
+    from src.config_loader import load_config
+
+    config_dir = tmp_path / "cfg"
+    urdf_copy = tmp_path / "assets" / "RRBot_single.urdf"
+    urdf_copy.parent.mkdir(parents=True)
+    shutil.copy2(URDF_RRBOT, urdf_copy)
+    output_dir = "../pipeline_output"
+    data_file = tmp_path / "data" / "measured.npz"
+    data_file.parent.mkdir(parents=True)
+    data_file.write_bytes(b"placeholder")
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "pipeline.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "urdf_path": "../assets/RRBot_single.urdf",
+                "output_dir": output_dir,
+                "identification": {"data_file": "../data/measured.npz"},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg["urdf_path"] == str((config_dir / "../assets/RRBot_single.urdf").resolve())
+    assert cfg["output_dir"] == str((config_dir / output_dir).resolve())
+    assert cfg["identification"]["data_file"] == str(
+        (config_dir / "../data/measured.npz").resolve()
+    )

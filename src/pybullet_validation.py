@@ -274,7 +274,7 @@ class PyBulletValidationRunner:
         cfg = self.cfg
         robot = parse_urdf(cfg["urdf_path"])
         output_root = Path(cfg["output_dir"])
-        self.output_dir = output_root / robot.name
+        self.output_dir = output_root
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = setup_logger(
             str(self.output_dir),
