@@ -1,6 +1,6 @@
 {
   "urdf_path": "../tests/assets/FrankaFR3_7DoF.urdf",
-  "output_dir": "../tmp_output/franka_fr3_7dof",
+  "output_dir": "../tmp_output/franka_fr3_7dof_friction_08_05",
   "method": "newton_euler",
 
   "stages": {
@@ -67,7 +67,7 @@
     ]
   },
   "friction": {
-    "model": "none"
+    "model": "viscous_coulomb"
   },
   "identification": {
     "solver": "ols",

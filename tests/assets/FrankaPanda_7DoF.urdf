@@ -1,0 +1,204 @@
+<?xml version="1.0"?>
+<!-- 7-DOF Franka Emika Panda Manipulator with Franka Hand lumped into link7
+     Identical to FrankaPanda_7DoF.urdf except link7's inertial is replaced
+     with the rigid-body sum of (panda_link7 + Franka Hand assembly).
+
+     Why lumped here rather than represented as a separate fixed-joint child:
+       The pipeline's RobotKinematics (src/kinematics.py) attaches inertial
+       parameters only to the child links of revolute joints (links 1-7). Any
+       inertia attached past joint7 via fixed joints (e.g. a separate
+       panda_hand link) is silently dropped from the Newton-Euler regressor.
+       Lumping hand+link7 into the link7 <inertial> tag is the standard way
+       to make a rigidly-attached payload visible to a regressor whose
+       parameter vector is fixed at 10*nDoF.
+
+     Hand assembly model (hand body + 2 closed fingers):
+       mass = 0.93 kg
+       COM (in hand frame) = (0, 0, 0.058) m
+       inertia about COM = diag(4.73e-4, 9.69e-4, 1.054e-3)
+     Hand frame -> link7 frame transform:
+       T = translate(0, 0, 0.107)  *  Rz(-pi/4)
+       (matches official kinetic-devel hand.xacro attachment)
+
+     Lumped link7+hand parameters (this file's <inertial>):
+       mass = 1.665522 kg
+       COM (link7 frame) = (0.004644, -0.001878, 0.119336)
+       I about combined COM (link7 frame, computed via parallel-axis theorem):
+         ixx=1.763574e-02  ixy=-1.616341e-04  ixz=-7.493645e-04
+         iyy=1.518474e-02  iyz=-9.215738e-04
+         izz=5.921852e-03
+
+     All other inertials remain Gaz et al. 2019 (RA-L 4(4)).
+-->
+<robot name="panda_with_hand">
+
+  <link name="world"/>
+
+  <joint name="base_fixed" type="fixed">
+    <parent link="world"/>
+    <child link="panda_link0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="panda_link0">
+    <inertial>
+      <origin xyz="-0.025 0.0 0.05" rpy="0 0 0"/>
+      <mass value="2.92"/>
+      <inertia ixx="0.0090" ixy="0.0" ixz="0.0"
+               iyy="0.0115" iyz="0.0"
+               izz="0.0085"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint1" type="revolute">
+    <parent link="panda_link0"/>
+    <child link="panda_link1"/>
+    <origin xyz="0 0 0.333" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87.0" velocity="2.1750"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="panda_link1">
+    <inertial>
+      <origin xyz="3.875e-03 2.081e-03 -0.1750" rpy="0 0 0"/>
+      <mass value="4.970684"/>
+      <inertia ixx="0.70337" ixy="-0.000139" ixz="0.006772"
+               iyy="0.70661" iyz="0.019169"
+               izz="0.009117"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint2" type="revolute">
+    <parent link="panda_link1"/>
+    <child link="panda_link2"/>
+    <origin xyz="0 0 0" rpy="-1.570796326794897 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.7628" upper="1.7628" effort="87.0" velocity="2.1750"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="panda_link2">
+    <inertial>
+      <origin xyz="-3.141e-03 -2.872e-02 3.495e-03" rpy="0 0 0"/>
+      <mass value="0.646926"/>
+      <inertia ixx="0.007962" ixy="-0.003925" ixz="0.010254"
+               iyy="0.028110" iyz="0.000704"
+               izz="0.025995"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint3" type="revolute">
+    <parent link="panda_link2"/>
+    <child link="panda_link3"/>
+    <origin xyz="0 -0.316 0" rpy="1.570796326794897 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87.0" velocity="2.1750"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="panda_link3">
+    <inertial>
+      <origin xyz="2.7518e-02 3.9252e-02 -6.6502e-02" rpy="0 0 0"/>
+      <mass value="3.228604"/>
+      <inertia ixx="0.037242" ixy="-0.004761" ixz="-0.011396"
+               iyy="0.036155" iyz="-0.012805"
+               izz="0.010830"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint4" type="revolute">
+    <parent link="panda_link3"/>
+    <child link="panda_link4"/>
+    <origin xyz="0.0825 0 0" rpy="1.570796326794897 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.0718" upper="-0.0698" effort="87.0" velocity="2.1750"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="panda_link4">
+    <inertial>
+      <origin xyz="-5.317e-02 1.04419e-01 2.7454e-02" rpy="0 0 0"/>
+      <mass value="3.587895"/>
+      <inertia ixx="0.025853" ixy="0.007796" ixz="-0.001332"
+               iyy="0.019552" iyz="0.008641"
+               izz="0.028323"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint5" type="revolute">
+    <parent link="panda_link4"/>
+    <child link="panda_link5"/>
+    <origin xyz="-0.0825 0.384 0" rpy="-1.570796326794897 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12.0" velocity="2.6100"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="panda_link5">
+    <inertial>
+      <origin xyz="-1.1953e-02 4.1065e-02 -3.8437e-02" rpy="0 0 0"/>
+      <mass value="1.225946"/>
+      <inertia ixx="0.035549" ixy="-0.002117" ixz="-0.004037"
+               iyy="0.029474" iyz="0.000229"
+               izz="0.008627"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint6" type="revolute">
+    <parent link="panda_link5"/>
+    <child link="panda_link6"/>
+    <origin xyz="0 0 0" rpy="1.570796326794897 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.0175" upper="3.7525" effort="12.0" velocity="2.6100"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="panda_link6">
+    <inertial>
+      <origin xyz="6.0149e-02 -1.4117e-02 -1.0517e-02" rpy="0 0 0"/>
+      <mass value="1.666555"/>
+      <inertia ixx="0.001964" ixy="0.000109" ixz="-0.001158"
+               iyy="0.004354" iyz="0.000341"
+               izz="0.005433"/>
+    </inertial>
+  </link>
+
+  <joint name="panda_joint7" type="revolute">
+    <parent link="panda_link6"/>
+    <child link="panda_link7"/>
+    <origin xyz="0.088 0 0" rpy="1.570796326794897 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12.0" velocity="2.6100"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <!-- ===== panda_link7 with the Franka Hand lumped via parallel-axis ===== -->
+  <link name="panda_link7">
+    <inertial>
+      <origin xyz="0.004644 -0.001878 0.119336" rpy="0 0 0"/>
+      <mass value="1.665522"/>
+      <inertia ixx="1.763574e-02" ixy="-1.616341e-04" ixz="-7.493645e-04"
+               iyy="1.518474e-02" iyz="-9.215738e-04"
+               izz="5.921852e-03"/>
+    </inertial>
+  </link>
+
+  <!-- Flange (still present so PyBullet kinematics match the standard chain) -->
+  <joint name="panda_joint8" type="fixed">
+    <parent link="panda_link7"/>
+    <child link="panda_link8"/>
+    <origin xyz="0 0 0.107" rpy="0 0 0"/>
+  </joint>
+
+  <link name="panda_link8">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.0"/>
+      <inertia ixx="0.0" ixy="0.0" ixz="0.0"
+               iyy="0.0" iyz="0.0"
+               izz="0.0"/>
+    </inertial>
+  </link>
+
+</robot>
