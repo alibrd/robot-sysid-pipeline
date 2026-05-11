@@ -34,6 +34,80 @@ from .urdf_parser import (
 )
 
 
+def _emit_identification_warnings(cfg, log, already_emitted):
+    """Log non-blocking warnings for known silent-fallback config combos."""
+    if already_emitted:
+        return True
+
+    ident = cfg["identification"]
+    solver = ident["solver"]
+    feas = ident["feasibility_method"]
+    friction_model = cfg["friction"]["model"]
+    bounds_cfg = ident.get("parameter_bounds")
+    bounds_set = (bounds_cfg is True) or (
+        isinstance(bounds_cfg, list) and len(bounds_cfg) == 2
+    )
+
+    if feas != "none" and friction_model != "none":
+        log.warning(
+            "feasibility_method='%s' does NOT constrain friction parameters "
+            "(Fv, Fcp, Fcn). Negative damping/Coulomb on weakly excited "
+            "joints is still possible.",
+            feas,
+        )
+    if feas != "none" and bounds_set:
+        log.warning(
+            "identification.parameter_bounds is set but will be ignored: "
+            "feasibility_method='%s' takes the optimisation off the "
+            "bounded-LS path.",
+            feas,
+        )
+    if feas != "none" and solver == "wls":
+        log.warning(
+            "solver='wls' combined with feasibility_method='%s': WLS "
+            "weights are not propagated into the constrained solver; "
+            "the feasibility path runs unweighted.",
+            feas,
+        )
+    if feas == "none" and solver == "ols" and friction_model != "none":
+        log.warning(
+            "solver='ols' with friction.model='%s' and no feasibility "
+            "constraints allows negative damping/Coulomb. Consider "
+            "solver='bounded_ls' with explicit lower bounds, or "
+            "feasibility_method='cholesky' (note: cholesky still leaves "
+            "friction unconstrained).",
+            friction_model,
+        )
+    return True
+
+
+def _clamp_negative_viscous_damping(pi_corrected, n_dof, friction_model, log):
+    """Clamp negative viscous damping in the friction tail of pi_corrected."""
+    if friction_model not in ("viscous", "viscous_coulomb"):
+        return pi_corrected
+
+    n_fric = friction_param_count(n_dof, friction_model)
+    fric_start = len(pi_corrected) - n_fric
+    fv_start = fric_start
+    fv_end = fv_start + n_dof
+    fv_block = pi_corrected[fv_start:fv_end]
+    neg_idx = np.where(fv_block < 0.0)[0]
+    if neg_idx.size == 0:
+        return pi_corrected
+
+    # check_feasibility can return the input vector by reference.
+    pi_corrected = pi_corrected.copy()
+    for j in neg_idx:
+        log.warning(
+            "Negative viscous damping on joint %d "
+            "(Fv=%.6g) -- clamping to 0.0 before "
+            "validation/URDF export.",
+            int(j) + 1, float(fv_block[j]),
+        )
+    pi_corrected[fv_start:fv_end] = np.maximum(fv_block, 0.0)
+    return pi_corrected
+
+
 class SystemIdentificationPipeline:
     """End-to-end robot system identification pipeline."""
 
@@ -45,6 +119,7 @@ class SystemIdentificationPipeline:
         self.output_dir = Path(self.cfg["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = setup_logger(str(self.output_dir))
+        self._id_warnings_emitted = False
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -708,6 +783,9 @@ class SystemIdentificationPipeline:
         log.info("-- Stage 10: Solving identification --")
         solver = cfg["identification"]["solver"]
         feas_method = cfg["identification"]["feasibility_method"]
+        self._id_warnings_emitted = _emit_identification_warnings(
+            cfg, log, self._id_warnings_emitted
+        )
         bounds_opt = None
         cfg_bounds = cfg["identification"].get("parameter_bounds")
         if isinstance(cfg_bounds, list) and len(cfg_bounds) == 2:
@@ -760,6 +838,10 @@ class SystemIdentificationPipeline:
             else:
                 log.warning("  Link %d: INFEASIBLE -- %s",
                             r["link"], "; ".join(r["issues"]))
+
+        pi_corrected = _clamp_negative_viscous_damping(
+            pi_corrected, kin.nDoF, cfg["friction"]["model"], log
+        )
 
         return {
             "W": W,

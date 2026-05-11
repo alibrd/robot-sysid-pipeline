@@ -204,6 +204,9 @@ def export_adapted_urdf(
             ],
             "notes": [
                 "URDF <dynamics damping> carries Fv (viscous).",
+                "Fv may have been clamped to 0 by the pipeline if the "
+                "unconstrained solver returned a negative value; raw values "
+                "remain in identification_results.npz['pi_identified'].",
                 "URDF <dynamics friction> carries 0.5*(|Fcp|+|Fcn|) since the "
                 "schema cannot represent direction-dependent Coulomb friction.",
                 "Use this sidecar if your simulator supports asymmetric "

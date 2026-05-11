@@ -466,6 +466,32 @@ def test_stage_10_parameter_bounds_enable_bounded_ls(tmp_path):
     print("  VERIFIED: Pipeline auto-switched from OLS to bounded_ls when parameter_bounds=true")
 
 
+def test_stage_10_viscous_clamp_uses_friction_tail_for_reduced_vectors():
+    from src.pipeline import _clamp_negative_viscous_damping
+
+    pi = np.array([
+        10.0, 11.0, 12.0, 13.0, 14.0,  # reduced rigid-body block
+        -0.3, 0.2,                      # Fv tail for two joints
+        0.7, -0.8, 0.9, -1.1,           # Coulomb terms remain unconstrained
+    ])
+
+    out = _clamp_negative_viscous_damping(
+        pi, n_dof=2, friction_model="viscous_coulomb",
+        log=logging.getLogger("test"),
+    )
+
+    expected = np.array([
+        10.0, 11.0, 12.0, 13.0, 14.0,
+        0.0, 0.2,
+        0.7, -0.8, 0.9, -1.1,
+    ])
+    np.testing.assert_allclose(out, expected)
+    np.testing.assert_allclose(
+        pi,
+        [10.0, 11.0, 12.0, 13.0, 14.0, -0.3, 0.2, 0.7, -0.8, 0.9, -1.1],
+    )
+
+
 def test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures():
     from src.feasibility import check_feasibility
 
