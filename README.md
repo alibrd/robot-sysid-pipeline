@@ -122,6 +122,10 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `validation_pybullet.comparison.tolerance_normalized_rms` | float | Normalised RMS tolerance |
 | `plot.format` | `png` / `pdf` / etc. | Output format |
 | `plot.dpi` | integer | Output resolution |
+| `export.enabled` | `true` / `false` | Opt-in adapted-URDF export sub-step of Stage 12 |
+| `export.urdf_filename` | filename | Output URDF name (must be a plain filename relative to `output_dir`; absolute paths and `..` are rejected) |
+| `export.friction_sidecar` | `true` / `false` | Also emit the asymmetric-friction JSON sidecar (only honored when `friction.model != "none"`) |
+| `export.friction_sidecar_filename` | filename | Sidecar JSON name; same plain-filename restriction as `export.urdf_filename` |
 
 The pipeline uses the literature-standard SLSQP excitation formulation. The
 method-specific `excitation.torque_constraint.*` keys are:
@@ -163,30 +167,44 @@ torque limits with this precedence:
 2. **Joint limits** -- merge URDF limits with JSON overrides; error if missing
 3. **Kinematics** -- build symbolic+lambdified transforms, Jacobians,
    derivatives
-4. **Regressor setup** -- Newton-Euler (numeric recursive) or Euler-Lagrange
-   (symbolic, cached as SymPy, re-lambdified on load)
-5. **Excitation design** -- Fourier trajectory optimisation with the
+4. **Newton-Euler regressor** -- numeric recursive `Y(q, dq, ddq)`;
+   selected by `method=newton_euler`
+5. **Euler-Lagrange regressor** -- symbolic Lagrangian-based regressor cached
+   as SymPy and re-lambdified on load; selected by `method=euler_lagrange`
+   (alternative to Stage 4)
+6. **Excitation design** -- Fourier trajectory optimisation with the
    literature-standard SLSQP formulation (`log10` condition number cost). It
    enforces joint-space limits with drift-aware sine amplitude bounds and
    can additionally apply torque-limited excitation. Cartesian/workspace
    constraints are not implemented
-6. **Data generation** -- synthetic from regressor or load external `.npz`
-7. **Observation matrix** -- stack regressors, optional Butterworth zero-phase
+7. **Data generation** -- synthetic from regressor or load external `.npz`
+8. **Observation matrix** -- stack regressors, optional Butterworth zero-phase
    filtering and downsampling. Raises an error if the number of equations is
    fewer than the number of unknowns
-8. **Base parameters** -- QR-based reduction (SciPy column-pivoted QR) to the
+9. **Base parameters** -- QR-based reduction (SciPy column-pivoted QR) to the
    identifiable parameter set
-9. **Identification** -- OLS / WLS (IRLS-weighted) / bounded LS. When
-   `feasibility_method` is `"lmi"`, SLSQP is used with per-link pseudo-inertia
-   PSD eigenvalue constraints (Wensing et al. 2018). When `"cholesky"`, each
-   link's pseudo-inertia is reparameterised as $J = LL^\top$ (lower-triangular
-   `L`), guaranteeing PSD by construction, and optimised with L-BFGS-B
-   (Traversaro et al. 2016). Both require `method=newton_euler`
-10. **Feasibility check** -- pseudo-inertia PSD per link (the
+10. **Identification** -- OLS / WLS (IRLS-weighted) / bounded LS. When
+    `feasibility_method` is `"lmi"`, SLSQP is used with per-link pseudo-inertia
+    PSD eigenvalue constraints (Wensing et al. 2018). When `"cholesky"`, each
+    link's pseudo-inertia is reparameterised as $J = LL^\top$ (lower-triangular
+    `L`), guaranteeing PSD by construction, and optimised with L-BFGS-B
+    (Traversaro et al. 2016). Both require `method=newton_euler`
+11. **Feasibility check** -- pseudo-inertia PSD per link (the
     necessary-and-sufficient condition for physical consistency). This subsumes
     positive mass, inertia PSD, and triangle-inequality checks, which are still
     reported for diagnostics
-11. **Results** -- `.npz` artifacts, JSON summary, and log file
+12. **Save outputs (and optional adapted-URDF export)** -- write
+    `pipeline.log`, `identification_results.npz`, and `results_summary.json`.
+    When `export.enabled=true`, the same stage additionally writes a
+    simulation-ready URDF whose per-link `<inertial>` blocks carry the
+    identified mass, COM, and COM-frame inertia (recovered by parallel-axis
+    inversion of the Atkeson 10-vector) and whose revolute `<dynamics>` tags
+    carry `damping = Fv` and `friction = 0.5*(|Fcp|+|Fcn|)`. With
+    `friction.model != "none"` and `export.friction_sidecar=true`, an
+    additional JSON sidecar preserves the full asymmetric `Fv / Fcp / Fcn`
+    triple per joint. Non-positive identified mass aborts the export, since
+    an infeasible parameter vector cannot be written into a physically valid
+    URDF
 
 ## Output files
 
@@ -211,6 +229,14 @@ All pipeline outputs are written to `<output_dir>/pipeline/`:
   resume (only produced by excitation-only runs)
 - `checkpoint_config.json` -- snapshot of the merged pipeline config at the time
   of the excitation-only run
+- `<export.urdf_filename>` (default `adapted_robot.urdf`) -- adapted URDF
+  carrying the identified per-link `<inertial>` (mass, COM, COM-frame
+  inertia) and per-joint `<dynamics>` (`damping=Fv`,
+  `friction = 0.5*(|Fcp|+|Fcn|)`); written only when `export.enabled=true`
+- `<export.friction_sidecar_filename>` (default `adapted_friction.json`) --
+  JSON sidecar with the full asymmetric `Fv / Fcp / Fcn` triple per joint;
+  written only when `export.enabled=true`, `friction.model != "none"`, and
+  `export.friction_sidecar=true`
 
 The plot stage writes `<output_dir>/plots/excitation_trajectory.png` (or the
 configured extension from `plot.format`).
@@ -304,6 +330,8 @@ real measured data.
 | `filtering.py` | Zero-phase Butterworth filtering and downsampling |
 | `friction.py` | Friction model parameter augmentation |
 | `pipeline.py` | Main pipeline orchestrator tying all stages together |
+| `urdf_exporter.py` | Stage 12 adapted-URDF export: parallel-axis inverse to write COM-frame `<inertial>` blocks, symmetric `<dynamics>` projection of identified friction, and asymmetric-friction JSON sidecar |
+| `export_adapted_urdf.py` | Standalone CLI wrapper around `urdf_exporter.export_adapted_urdf` for re-exporting from a saved `identification_results.npz` without re-running the pipeline |
 | `pybullet_validation.py` | Standalone PyBullet torque comparison runner |
 | `pybullet_validation_report.py` | Markdown / CSV / per-joint plot exporter for a validation run |
 | `pybullet_validation_benchmark.py` | Multi-run benchmark aggregator |
@@ -335,6 +363,14 @@ real measured data.
 - **Friction models**: viscous, Coulomb, and combined friction augmentation is
   supported, but the friction coefficients are treated as free parameters in the
   regressor -- no special physical constraints are applied to them
+- **Adapted-URDF export**: the Stage 12 export step preserves topology,
+  visuals, and `<mesh>` / `package://` references verbatim, so the adapted
+  URDF must be loaded from a directory that resolves the same asset
+  references as the input URDF. The URDF schema cannot represent
+  direction-dependent dry friction, so `<dynamics friction>` carries the
+  symmetric average `0.5*(|Fcp|+|Fcn|)`; the optional JSON sidecar preserves
+  the full asymmetric `Fv / Fcp / Fcn` triple for simulators that can
+  consume it
 
 ## References
 

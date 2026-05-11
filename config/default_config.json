@@ -92,5 +92,11 @@
     },
 
     "report": {},
-    "benchmark": {}
+    "benchmark": {},
+    "export": {
+        "enabled": false,
+        "urdf_filename": "adapted_robot.urdf",
+        "friction_sidecar": true,
+        "friction_sidecar_filename": "adapted_friction.json"
+    }
 }

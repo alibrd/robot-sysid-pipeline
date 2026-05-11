@@ -1,5 +1,7 @@
 """Load and validate the JSON configuration file."""
 import json
+import sys
+import warnings
 from copy import deepcopy
 from pathlib import Path
 
@@ -233,3 +235,51 @@ def _validate(cfg: dict, path: str):
             "Set excitation_only=true to stop after Stage 6, or set "
             "checkpoint_dir to resume from a previous run, but not both."
         )
+
+    # Adapted-URDF export (Stage 12) — minimal foot-gun checks on filenames.
+    exp = cfg.get("export") or {}
+    if exp.get("enabled", False):
+        if cfg["method"] == "euler_lagrange":
+            msg = (
+                "Adapted-URDF export requires method='newton_euler' because "
+                "the Euler-Lagrange path uses a reduced parameter vector that "
+                "cannot be written back as full per-link URDF inertials."
+            )
+            warnings.warn(f"[{path}] {msg}", RuntimeWarning, stacklevel=2)
+            if not sys.stdin.isatty():
+                raise ValueError(
+                    f"[{path}] {msg} Non-interactive runs cannot ask for "
+                    "consent. Use method='newton_euler' or set "
+                    "export.enabled=false."
+                )
+            try:
+                answer = input(
+                    "Continue this run without adapted-URDF export? [y/N] "
+                )
+            except EOFError as exc:
+                raise ValueError(
+                    f"[{path}] Could not read consent. Use "
+                    "method='newton_euler' or set export.enabled=false."
+                ) from exc
+            if answer.strip().lower() not in {"y", "yes"}:
+                raise ValueError(
+                    f"[{path}] Aborted because export.enabled=true is "
+                    "unsupported with method='euler_lagrange'."
+                )
+            exp["enabled"] = False
+            cfg["export"] = exp
+
+        for fn_key in ("urdf_filename", "friction_sidecar_filename"):
+            v = exp.get(fn_key)
+            if v is None:
+                continue
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"[{path}] 'export.{fn_key}' must be a string, got {type(v).__name__}"
+                )
+            v_path = Path(v)
+            if v_path.is_absolute() or ".." in v_path.parts:
+                raise ValueError(
+                    f"[{path}] 'export.{fn_key}' must be a plain filename "
+                    f"relative to output_dir, got '{v}'"
+                )

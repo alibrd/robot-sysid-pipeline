@@ -1406,7 +1406,7 @@ STAGE 12: LMI-constrained NE identification must return a feasible model
 - The EL branch cannot use either constrained feasibility path because its reduced symbolic regressor cannot be mapped back to full per-link 10-parameter blocks in the current implementation.
 - If a reduced parameter vector has fewer than $10n$ entries, `check_feasibility()` cannot perform complete per-link pseudo-inertia checks on missing blocks.
 
-## Stage 12. Save Outputs, Write Logs, and Interpret Success Correctly
+## Stage 12. Save Outputs, Write Logs, Optionally Export an Adapted URDF, and Interpret Success Correctly
 
 ### Output artifacts
 The pipeline writes:
@@ -1415,6 +1415,8 @@ The pipeline writes:
 - `torque_limit_validation.npz` when torque-constrained replay is produced
 - `identification_results.npz`
 - `results_summary.json`
+- `<export.urdf_filename>` (default `adapted_robot.urdf`) when `export.enabled=true`
+- `<export.friction_sidecar_filename>` (default `adapted_friction.json`) when `export.enabled=true`, `friction.model != "none"`, and `export.friction_sidecar=true`
 
 These are orchestrated from [`src/pipeline.py`](../src/pipeline.py), with logging configured in [`src/pipeline_logger.py`](../src/pipeline_logger.py).
 
@@ -1454,6 +1456,79 @@ temporary loadable URDF, revolute and continuous joints receive missing limit
 attributes before loading, and known vendored FingerEdu
 `package://robot_properties_fingers/meshes` URIs are rewritten to local mesh
 asset paths when the assets are present.
+
+### Adapted-URDF export (opt-in Stage 12 sub-step)
+
+When `export.enabled=true`, Stage 12 additionally writes a simulation-ready
+URDF whose dynamic parameters reproduce the identified vector. The adaptation
+is a deterministic re-emission of the input URDF:
+
+- **Topology, visuals, collisions, and `<mesh>` / `package://` references
+  are preserved verbatim.** Only `<inertial>` blocks of revolute child links
+  and `<dynamics>` tags of revolute joints are rewritten. Xacro sources are
+  resolved to URDF text via `urdf_parser.resolve_xacro_to_urdf_xml` before
+  editing, reusing the same code path as the PyBullet validator.
+- **Per-link `<inertial>` block.** The Atkeson 10-vector
+  $\boldsymbol{\pi}_i = [m_i,\,m_i c_x,\,m_i c_y,\,m_i c_z,\,
+  I^O_{xx}, I^O_{xy}, I^O_{xz}, I^O_{yy}, I^O_{yz}, I^O_{zz}]$ stores
+  inertia at the *link-frame origin*. The URDF schema instead expects mass
+  at the COM placed via `<origin xyz=COM>` plus a *COM-frame* inertia
+  tensor. The exporter therefore recovers
+  $\mathbf{c}_i = (m_i \mathbf{c}_i)/m_i$ and applies the parallel-axis
+  inverse
+  $$
+  I^{COM}_i \;=\; I^O_i \;-\; m_i\big(\|\mathbf{c}_i\|^2\,\mathbf{I}_3
+  \;-\;\mathbf{c}_i \mathbf{c}_i^\top\big)
+  $$
+  before writing the six unique components into `<inertia ixx ... izz>`.
+  The construction is mathematically lossless: re-parsing the adapted URDF
+  through `parse_urdf` + `RobotKinematics` recovers the original
+  $\boldsymbol{\pi}_i$ exactly (cited in the verification subsection
+  below).
+- **Per-joint `<dynamics>` projection.** When `friction.model != "none"`
+  the identified friction tail $[F_v,\,F_{cp},\,F_{cn}]$ per joint is
+  projected onto the URDF schema as
+  $\text{damping}=F_v$ and $\text{friction}=\tfrac{1}{2}(|F_{cp}|+|F_{cn}|)$.
+  The symmetric average is necessary because URDF `<dynamics friction>`
+  cannot represent direction-dependent dry friction; the average minimises
+  the L¹ representation error against the identified asymmetric pair.
+- **Asymmetric-friction JSON sidecar.** When the URDF projection above
+  loses information ($F_{cp} \neq F_{cn}$) the exporter additionally writes
+  a sidecar JSON whose contract is
+  ```
+  {
+    "friction_model": "viscous_coulomb",
+    "joints": [
+      {"name": j, "Fv_viscous": ..., "Fcp_coulomb_positive": ...,
+       "Fcn_coulomb_negative": ...}, ...
+    ]
+  }
+  ```
+  so simulators that *can* consume direction-dependent friction recover the
+  full identified model.
+- **Preconditions.** The exporter refuses to write a non-physical URDF: a
+  non-positive identified mass on any link aborts Stage 12 with a clear
+  error pointing at `identification.parameter_bounds=true` or a
+  feasibility method (`cholesky` / `lmi`). Pairing `export.enabled=true`
+  with an unconstrained `solver=ols` and `feasibility_method=none` is
+  therefore safe but likely to abort late on small / underdetermined
+  chains.
+
+### Code path
+- [`src/urdf_exporter.py`](../src/urdf_exporter.py) hosts
+  `export_adapted_urdf`, the parallel-axis inverse, friction projection,
+  and sidecar writer.
+- [`src/pipeline.py`](../src/pipeline.py)
+  (`SystemIdentificationPipeline._run_stages_7_to_11`) invokes the export
+  as the final Stage 12 sub-step after `results_summary.json` has been
+  written, then re-serialises the summary with the `export` block.
+- [`src/runner.py`](../src/runner.py) threads the unified `export` config
+  block through to the pipeline cfg so the same hook is reachable from
+  `sysid.py`.
+- [`src/export_adapted_urdf.py`](../src/export_adapted_urdf.py) is a
+  standalone CLI that delegates to the same `export_adapted_urdf` for
+  re-export from a saved `identification_results.npz` without re-running
+  the pipeline.
 
 ### Important semantic distinction
 Pipeline completion and physical feasibility are **not** the same statement.
@@ -1535,6 +1610,42 @@ tests/test_torque_constraints.py::test_torque_pipeline_end_to_end_actuator_envel
 tests/test_torque_constraints.py::test_stage_7_to_12_shared_torque_harness_runs_one_method_at_a_time PASSED
 ```
 
+**What is verified**: The optional Stage 12 adapted-URDF export is
+mathematically lossless (the parallel-axis inverse applied to the Atkeson
+10-vector round-trips through the URDF parser exactly), the asymmetric
+friction model is preserved by the JSON sidecar, the URDF `<dynamics>`
+projection writes the symmetric-average friction, the config validator
+rejects unsafe export filenames, and the unified runner threads the
+`export` block end-to-end. A slow PyBullet round-trip additionally checks
+that inverse-dynamics torques on the adapted URDF match the original to
+floating-point precision.
+
+**Run**:
+```bash
+pytest tests/test_urdf_export.py -v
+pytest tests/test_urdf_export.py --run-slow -m slow -v   # PyBullet round-trip
+```
+
+**Expected output** (excerpt):
+```
+tests/test_urdf_export.py::TestExportRoundTrip::test_rrbot_no_friction_round_trip PASSED
+tests/test_urdf_export.py::TestExportRoundTrip::test_elbow_round_trip_preserves_chain_order PASSED
+tests/test_urdf_export.py::TestExportRoundTrip::test_perturbed_inertials_round_trip PASSED
+tests/test_urdf_export.py::TestFrictionSidecar::test_viscous_coulomb_sidecar_contents PASSED
+tests/test_urdf_export.py::TestFrictionSidecar::test_dynamics_tag_is_written_for_friction PASSED
+tests/test_urdf_export.py::TestFrictionSidecar::test_no_friction_means_no_sidecar PASSED
+tests/test_urdf_export.py::TestExportValidation::test_non_positive_mass_raises PASSED
+tests/test_urdf_export.py::TestExportValidation::test_parameter_length_mismatch_raises PASSED
+tests/test_urdf_export.py::TestExportValidation::test_ndof_mismatch_raises PASSED
+tests/test_urdf_export.py::TestExportValidation::test_config_loader_rejects_absolute_export_filename PASSED
+tests/test_urdf_export.py::TestExportValidation::test_config_loader_rejects_parent_traversal PASSED
+tests/test_urdf_export.py::TestStage12Integration::test_export_disabled_writes_no_extra_files PASSED
+tests/test_urdf_export.py::TestStage12Integration::test_export_enabled_writes_adapted_urdf PASSED
+tests/test_urdf_export.py::TestRunnerThreading::test_unified_runner_writes_adapted_urdf PASSED
+tests/test_urdf_export.py::TestStandaloneCLIDelegates::test_tool_exports_from_npz PASSED
+tests/test_urdf_export.py::test_pybullet_round_trip_consistency PASSED   # --run-slow
+```
+
 ## Traceability Appendix
 
 | Stage | Main claim | Code | Verification |
@@ -1568,6 +1679,12 @@ tests/test_torque_constraints.py::test_stage_7_to_12_shared_torque_harness_runs_
 | 12 | Torque-constrained runs emit dense replay summaries and method-specific artifacts consistently across the supported methods | [`src/pipeline.py`](../src/pipeline.py), [`src/torque_constraints.py`](../src/torque_constraints.py) | `test_torque_pipeline_end_to_end_nominal_hard`, `test_torque_pipeline_end_to_end_robust_box`, `test_torque_pipeline_end_to_end_chance`, `test_torque_pipeline_end_to_end_actuator_envelope_with_rms`, `test_torque_pipeline_end_to_end_sequential_redesign_improves_or_matches_initial_ratio`, `test_stage_7_to_12_shared_torque_harness_runs_one_method_at_a_time`, `test_slow_all_six_methods_emit_comparable_summary_metrics`, `test_slow_oversampled_replay_detects_hidden_between_sample_violations` |
 | 12 | Constrained NE identification can return a feasible model (LMI) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_stage_12_constrained_lmi_returns_feasible_newton_euler_model` |
 | 12 | Constrained NE identification can return a feasible model (Cholesky) | [`src/solver.py`](../src/solver.py), [`src/feasibility.py`](../src/feasibility.py) | `test_stage_12_cholesky_constrained_produces_feasible_model` |
+| 12 | Optional adapted-URDF export round-trips through `parse_urdf` exactly via the parallel-axis inverse on the Atkeson 10-vector | [`src/urdf_exporter.py`](../src/urdf_exporter.py), [`src/pipeline.py`](../src/pipeline.py) | `TestExportRoundTrip::test_rrbot_no_friction_round_trip`, `TestExportRoundTrip::test_elbow_round_trip_preserves_chain_order`, `TestExportRoundTrip::test_perturbed_inertials_round_trip` |
+| 12 | URDF `<dynamics>` projection writes `damping=Fv` and `friction=0.5*(\|Fcp\|+\|Fcn\|)`; the JSON sidecar preserves the full asymmetric `Fv/Fcp/Fcn` triple | [`src/urdf_exporter.py`](../src/urdf_exporter.py) | `TestFrictionSidecar::test_viscous_coulomb_sidecar_contents`, `TestFrictionSidecar::test_dynamics_tag_is_written_for_friction`, `TestFrictionSidecar::test_no_friction_means_no_sidecar` |
+| 12 | Export refuses non-physical parameter vectors and unsafe export filenames | [`src/urdf_exporter.py`](../src/urdf_exporter.py), [`src/config_loader.py`](../src/config_loader.py) | `TestExportValidation::test_non_positive_mass_raises`, `TestExportValidation::test_parameter_length_mismatch_raises`, `TestExportValidation::test_ndof_mismatch_raises`, `TestExportValidation::test_config_loader_rejects_absolute_export_filename`, `TestExportValidation::test_config_loader_rejects_parent_traversal` |
+| 12 | Pipeline and unified runner reach Stage 12 export end-to-end with `export.enabled=true` | [`src/pipeline.py`](../src/pipeline.py), [`src/runner.py`](../src/runner.py) | `TestStage12Integration::test_export_disabled_writes_no_extra_files`, `TestStage12Integration::test_export_enabled_writes_adapted_urdf`, `TestRunnerThreading::test_unified_runner_writes_adapted_urdf` |
+| 12 | Standalone CLI re-exports from a saved `identification_results.npz` via the same `export_adapted_urdf` implementation | [`src/export_adapted_urdf.py`](../src/export_adapted_urdf.py) | `TestStandaloneCLIDelegates::test_tool_exports_from_npz` |
+| 12 | Adapted URDF is dynamically equivalent to the input under PyBullet inverse dynamics | [`src/urdf_exporter.py`](../src/urdf_exporter.py) | `test_pybullet_round_trip_consistency` (`--run-slow`) |
 
 ## References
 

@@ -113,7 +113,11 @@ class SystemIdentificationPipeline:
     # ------------------------------------------------------------------
 
     def _run_stages_1_to_4(self) -> dict:
-        """Stages 1-4: URDF parse, joint limits, kinematics, regressor setup.
+        """Initial setup stages: URDF parse, joint limits, kinematics, regressor build.
+
+        Covers documented Stages 1-4 when ``method=newton_euler`` and Stages
+        1-3 + 5 when ``method=euler_lagrange`` (the theory doc treats the two
+        regressor formulations as Stages 4 and 5 respectively).
 
         Returns a context dict that carries all cross-stage state.
         """
@@ -144,12 +148,15 @@ class SystemIdentificationPipeline:
         log.info("Initial parameter vector (10n=%d): %s",
                  len(kin.PI), kin.PI.flatten()[:6].tolist())
 
-        log.info("-- Stage 4: Setting up regressor (%s) --", cfg["method"])
+        # The theory doc treats NE and EL as Stages 4 and 5 respectively;
+        # only one is built per run, so the log line picks the matching label.
         el_kept_cols = None
         if cfg["method"] == "newton_euler":
+            log.info("-- Stage 4: Setting up Newton-Euler regressor --")
             def regressor_fn(q, dq, ddq):
                 return newton_euler_regressor(kin, q, dq, ddq)
         else:
+            log.info("-- Stage 5: Setting up Euler-Lagrange regressor --")
             cache_dir = str(self.output_dir / "el_cache")
             regressor_fn, el_kept_cols = euler_lagrange_regressor_builder(
                 kin, cache_dir
@@ -191,10 +198,12 @@ class SystemIdentificationPipeline:
         }
 
     def _run_stage_5(self, ctx: dict) -> None:
-        """Stage 5: Excitation trajectory optimisation.
+        """Stage 6: Excitation trajectory optimisation.
 
-        Populates ctx with exc_result, nominal_params_used, sequential_history,
-        and (for sequential_redesign) also identification.
+        Method name is kept for backward-compatibility; the documented stage
+        number is 6 (excitation). Populates ctx with ``exc_result``,
+        ``nominal_params_used``, ``sequential_history``, and
+        (for ``sequential_redesign``) also ``identification``.
         """
         log = self.logger
         cfg = self.cfg
@@ -212,7 +221,7 @@ class SystemIdentificationPipeline:
         sequential_history = []
 
         if torque_method == "sequential_redesign":
-            log.info("-- Stage 5: Sequential torque-limited excitation redesign --")
+            log.info("-- Stage 6: Sequential torque-limited excitation redesign --")
             torque_cfg = cfg["excitation"].get("torque_constraint", {})
             current_nominal = true_nominal_params.copy()
             max_iterations = int(torque_cfg.get("max_iterations", 3))
@@ -232,7 +241,7 @@ class SystemIdentificationPipeline:
                     nominal_params=nominal_params_used,
                 )
 
-                log.info("-- Stage 6 (iter %d): Generating trajectory data --",
+                log.info("-- Stage 7 (iter %d): Generating trajectory data --",
                          iteration + 1)
                 q_data, dq_data, ddq_data, tau_data, data_fs = \
                     self._load_or_generate_data(ctx, exc_result)
@@ -284,7 +293,7 @@ class SystemIdentificationPipeline:
             ctx["data_fs"] = data_fs
 
         else:
-            log.info("-- Stage 5: Excitation trajectory optimisation --")
+            log.info("-- Stage 6: Excitation trajectory optimisation --")
             exc_result = optimise_excitation(
                 kin, cfg["excitation"], q_lim, dq_lim, ddq_lim,
                 friction_model=cfg["friction"]["model"],
@@ -299,20 +308,23 @@ class SystemIdentificationPipeline:
         log.info("Excitation cost: %.6f", ctx["exc_result"]["cost"])
 
     def _run_stage_6(self, ctx: dict) -> None:
-        """Stage 6: Data generation (synthetic or external).
+        """Stage 7: Data generation (synthetic or external).
 
-        Populates ctx with q_data, dq_data, ddq_data, tau_data, data_fs.
-        For sequential_redesign, data was already generated in Stage 5.
+        Method name is kept for backward-compatibility; the documented stage
+        number is 7 (data generation). Populates ctx with ``q_data``,
+        ``dq_data``, ``ddq_data``, ``tau_data``, ``data_fs``. For
+        ``sequential_redesign``, data was already generated per iteration
+        inside the Stage 6 redesign loop.
         """
         log = self.logger
         torque_method = ctx["torque_method"]
 
         if torque_method == "sequential_redesign":
             # Data already generated inside the sequential loop
-            log.info("-- Stage 6: Data generation (done in sequential redesign) --")
+            log.info("-- Stage 7: Data generation (done in sequential redesign) --")
             return
 
-        log.info("-- Stage 6: Generating trajectory data --")
+        log.info("-- Stage 7: Generating trajectory data --")
         q_data, dq_data, ddq_data, tau_data, data_fs = \
             self._load_or_generate_data(ctx, ctx["exc_result"])
         ctx["q_data"] = q_data
@@ -322,8 +334,15 @@ class SystemIdentificationPipeline:
         ctx["data_fs"] = data_fs
 
     def _run_stages_7_to_11(self, ctx: dict) -> None:
-        """Stages 7-11: observation matrix, base-param reduction,
-        identification, feasibility, torque validation, save results.
+        """Identification and post-identification stages.
+
+        Covers documented Stages 8-12: observation matrix, base-parameter
+        reduction, identification, feasibility, torque validation, save
+        outputs, and (when ``export.enabled=true``) the optional
+        adapted-URDF / friction-sidecar export as a Stage 12 sub-step.
+
+        The ``_7_to_11`` suffix in the method name is retained for
+        backward-compatibility with external references.
         """
         log = self.logger
         cfg = self.cfg
@@ -334,8 +353,9 @@ class SystemIdentificationPipeline:
         nominal_params_used = ctx["nominal_params_used"]
         sequential_history = ctx["sequential_history"]
 
-        # For sequential_redesign, identification was already done in Stage 5.
-        # For all other modes, run it now.
+        # For sequential_redesign, identification was already done per
+        # iteration inside the Stage 6 redesign loop. For all other modes,
+        # run it now.
         if torque_method == "sequential_redesign":
             identification = ctx["identification"]
         else:
@@ -392,7 +412,7 @@ class SystemIdentificationPipeline:
             )
             log.info("Torque validation saved to %s", torque_path)
 
-        log.info("-- Stage 11: Saving results --")
+        log.info("-- Stage 12: Saving outputs --")
         results = {
             "pi_identified": identification["pi_identified_full"],
             "pi_base": identification["pi_base"],
@@ -469,6 +489,46 @@ class SystemIdentificationPipeline:
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
         log.info("Summary saved to %s", summary_path)
+
+        # ---- Stage 12 (cont.): optional adapted-URDF export ---------------
+        # Stage 12 is "save outputs". When export.enabled=true, the same
+        # stage additionally writes a simulation-ready URDF (and an optional
+        # asymmetric-friction sidecar) alongside the npz/json/log artifacts.
+        export_cfg = cfg.get("export") or {}
+        if export_cfg.get("enabled", False):
+            from .urdf_exporter import export_adapted_urdf
+
+            log.info("Stage 12: exporting adapted URDF")
+            urdf_name = export_cfg.get("urdf_filename", "adapted_robot.urdf")
+            sidecar_enabled = (
+                export_cfg.get("friction_sidecar", True)
+                and cfg["friction"]["model"] != "none"
+            )
+            sidecar_name = (
+                export_cfg.get(
+                    "friction_sidecar_filename", "adapted_friction.json"
+                )
+                if sidecar_enabled
+                else None
+            )
+            export_meta = export_adapted_urdf(
+                input_urdf_path=cfg["urdf_path"],
+                pi_full=identification["pi_corrected"],
+                n_dof=kin.nDoF,
+                friction_model=cfg["friction"]["model"],
+                output_urdf_path=self.output_dir / urdf_name,
+                friction_sidecar_path=(
+                    self.output_dir / sidecar_name if sidecar_name else None
+                ),
+                logger=log,
+            )
+            summary["export"] = {
+                "adapted_urdf_path": export_meta["adapted_urdf_path"],
+                "friction_sidecar_path": export_meta["friction_sidecar_path"],
+                "n_friction_params": export_meta["n_friction_params"],
+            }
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
 
     # ------------------------------------------------------------------
     # Checkpoint save / load
@@ -624,28 +684,28 @@ class SystemIdentificationPipeline:
 
     def _solve_identification_pass(self, ctx, q_data, dq_data, ddq_data,
                                    tau_data, data_fs):
-        """Stages 7-10: observation matrix → base params → solve → feasibility."""
+        """Documented Stages 8-11: observation matrix → base params → solve → feasibility."""
         log = self.logger
         cfg = self.cfg
         kin = ctx["kin"]
         regressor_fn = ctx["regressor_fn"]
         el_kept_cols = ctx["el_kept_cols"]
 
-        log.info("-- Stage 7: Building observation matrix --")
+        log.info("-- Stage 8: Building observation matrix --")
         W, tau_vec = build_observation_matrix(
             q_data, dq_data, ddq_data, tau_data,
             regressor_fn, cfg, data_fs
         )
         log.info("W shape: %s", W.shape)
 
-        log.info("-- Stage 8: Base parameter reduction --")
+        log.info("-- Stage 9: Base parameter reduction --")
         pi_full = self._nominal_parameter_vector(kin, el_kept_cols)
         W_base, P_mat, kept_cols, rank, pi_base = compute_base_parameters(
             W, pi_full
         )
         log.info("Base parameters: %d (from %d full)", rank, len(pi_full))
 
-        log.info("-- Stage 9: Solving identification --")
+        log.info("-- Stage 10: Solving identification --")
         solver = cfg["identification"]["solver"]
         feas_method = cfg["identification"]["feasibility_method"]
         bounds_opt = None
@@ -689,7 +749,7 @@ class SystemIdentificationPipeline:
             recon_err,
         )
 
-        log.info("-- Stage 10: Feasibility check --")
+        log.info("-- Stage 11: Feasibility check --")
         report, feasible, pi_corrected = check_feasibility(
             pi_identified_full, kin.nDoF, method=feas_method
         )

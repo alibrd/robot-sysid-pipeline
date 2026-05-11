@@ -56,6 +56,7 @@ _KNOWN_TOP_LEVEL_KEYS = {
     "plot",
     "report",
     "benchmark",
+    "export",
 }
 
 _PIPELINE_SUBDIR = "pipeline"
@@ -381,6 +382,7 @@ class UnifiedRunner:
             "identification": deepcopy(cfg.get("identification", {})),
             "filtering": deepcopy(cfg.get("filtering", {})),
             "downsampling": deepcopy(cfg.get("downsampling", {})),
+            "export": deepcopy(cfg.get("export", {})),
         }
 
         # Run the pipeline-config validator so that every existing
