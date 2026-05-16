@@ -33,9 +33,26 @@ def load_validation_artifacts(validation_dir: str):
 
 
 def export_validation_report(validation_dir: str) -> dict:
-    """Write a markdown summary, a CSV table, and PNG plots for a validation run."""
-    summary, data = load_validation_artifacts(validation_dir)
-    out_dir = Path(validation_dir)
+    """Write a markdown summary, a CSV table, and PNG plots for a validation run.
+
+    Dispatches to the PyBullet or measurement-path exporter depending on which
+    summary file the validation backend produced in ``validation_dir``.
+    """
+    base = Path(validation_dir)
+    if (base / "pybullet_validation_summary.json").exists():
+        return _export_pybullet_report(base)
+    if (base / "measurement_validation_summary.json").exists():
+        from .measurement_validation_report import export_measurement_validation_report
+        return export_measurement_validation_report(validation_dir)
+    raise FileNotFoundError(
+        "No validation summary found in "
+        f"{validation_dir}. Expected pybullet_validation_summary.json or "
+        "measurement_validation_summary.json."
+    )
+
+
+def _export_pybullet_report(out_dir: Path) -> dict:
+    summary, data = load_validation_artifacts(str(out_dir))
 
     csv_path = out_dir / "pybullet_validation_metrics.csv"
     md_path = out_dir / "pybullet_validation_report.md"
@@ -43,7 +60,16 @@ def export_validation_report(validation_dir: str) -> dict:
     rows = _build_metric_rows(summary)
     _write_metrics_csv(csv_path, rows)
     _write_markdown_report(md_path, summary, rows)
-    plot_paths = _write_plots(out_dir, summary, data)
+    plot_paths = _write_torque_plots(
+        out_dir=out_dir,
+        joint_names=summary["joint_names"],
+        t=data["t"],
+        tau_a=data["tau_pipeline"],
+        tau_b=data["tau_pybullet"],
+        tau_abs_error=data["tau_abs_error"],
+        label_a="Pipeline",
+        label_b="PyBullet",
+    )
 
     return {
         "report_markdown": str(md_path),
@@ -124,27 +150,34 @@ def _write_markdown_report(md_path: Path, summary: dict, rows):
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_plots(out_dir: Path, summary: dict, data) -> list[str]:
+def _write_torque_plots(
+    *,
+    out_dir: Path,
+    joint_names,
+    t,
+    tau_a,
+    tau_b,
+    tau_abs_error,
+    label_a: str,
+    label_b: str,
+) -> list[str]:
     """Generate torque overlay and absolute error plots for each joint."""
     plt = _import_matplotlib_pyplot()
-    t = data["t"]
-    tau_pipeline = data["tau_pipeline"]
-    tau_pybullet = data["tau_pybullet"]
-    tau_abs_error = data["tau_abs_error"]
     plot_paths = []
+    err_ylabel = f"|tau_{label_b.lower().replace(' ', '_')} - tau_{label_a.lower().replace(' ', '_')}|"
 
     combined_overlay_path = out_dir / "torque_overlay_all_joints.png"
     fig, axes = plt.subplots(
-        nrows=len(summary["joint_names"]),
+        nrows=len(joint_names),
         ncols=1,
-        figsize=(10, max(4.0, 3.6 * len(summary["joint_names"]))),
+        figsize=(10, max(4.0, 3.6 * len(joint_names))),
         sharex=True,
     )
     axes = np.atleast_1d(axes)
-    for joint_idx, joint_name in enumerate(summary["joint_names"]):
+    for joint_idx, joint_name in enumerate(joint_names):
         ax = axes[joint_idx]
-        ax.plot(t, tau_pipeline[:, joint_idx], label="Pipeline", linewidth=1.6)
-        ax.plot(t, tau_pybullet[:, joint_idx], label="PyBullet", linewidth=1.2,
+        ax.plot(t, tau_a[:, joint_idx], label=label_a, linewidth=1.6)
+        ax.plot(t, tau_b[:, joint_idx], label=label_b, linewidth=1.2,
                 linestyle="--")
         ax.set_title(f"Torque Overlay: {joint_name}")
         ax.set_ylabel("Torque")
@@ -156,13 +189,13 @@ def _write_plots(out_dir: Path, summary: dict, data) -> list[str]:
     plt.close(fig)
     plot_paths.append(str(combined_overlay_path))
 
-    for joint_idx, joint_name in enumerate(summary["joint_names"]):
+    for joint_idx, joint_name in enumerate(joint_names):
         overlay_path = out_dir / f"torque_overlay_{joint_name}.png"
         error_path = out_dir / f"torque_abs_error_{joint_name}.png"
 
         fig, ax = plt.subplots(figsize=(10, 4.5))
-        ax.plot(t, tau_pipeline[:, joint_idx], label="Pipeline", linewidth=1.6)
-        ax.plot(t, tau_pybullet[:, joint_idx], label="PyBullet", linewidth=1.2,
+        ax.plot(t, tau_a[:, joint_idx], label=label_a, linewidth=1.6)
+        ax.plot(t, tau_b[:, joint_idx], label=label_b, linewidth=1.2,
                 linestyle="--")
         ax.set_title(f"Torque Overlay: {joint_name}")
         ax.set_xlabel("Time [s]")
@@ -177,7 +210,7 @@ def _write_plots(out_dir: Path, summary: dict, data) -> list[str]:
         ax.plot(t, tau_abs_error[:, joint_idx], color="#c23b22", linewidth=1.4)
         ax.set_title(f"Absolute Torque Error: {joint_name}")
         ax.set_xlabel("Time [s]")
-        ax.set_ylabel("|tau_pybullet - tau_pipeline|")
+        ax.set_ylabel(err_ylabel)
         ax.grid(True, alpha=0.25)
         fig.tight_layout()
         fig.savefig(error_path, dpi=160)
