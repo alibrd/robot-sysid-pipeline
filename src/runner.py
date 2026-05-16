@@ -191,6 +191,13 @@ class UnifiedRunner:
         identification["data_file"] = resolve_path_value(
             identification.get("data_file"), base_dir
         )
+        cache_cfg = identification.get("observation_matrix_cache")
+        if isinstance(cache_cfg, dict):
+            cache_cfg = deepcopy(cache_cfg)
+            cache_cfg["load_from"] = resolve_path_value(
+                cache_cfg.get("load_from"), base_dir
+            )
+            identification["observation_matrix_cache"] = cache_cfg
         resolved["identification"] = identification
         return resolved
 
@@ -386,8 +393,8 @@ class UnifiedRunner:
         }
 
         # Run the pipeline-config validator so that every existing
-        # validation rule still fires (e.g. mutually-exclusive run modes,
-        # torque-method preconditions, EL+constrained rejection).
+        # validation rule still fires (e.g. mutually-exclusive run modes and
+        # torque-method preconditions).
         validated = load_config_dict(
             pipeline_cfg,
             config_path=self.config_path,

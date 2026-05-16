@@ -62,7 +62,13 @@
         "solver": "ols",
         "parameter_bounds": false,
         "feasibility_method": "none",
-        "data_file": null
+        "data_file": null,
+        "observation_matrix_cache": {
+            "save": false,
+            "filename": "observation_matrix_cache.npz",
+            "load_from": null,
+            "force_load": false
+        }
     },
 
     "filtering": {

@@ -1,7 +1,5 @@
 """Load and validate the JSON configuration file."""
 import json
-import sys
-import warnings
 from copy import deepcopy
 from pathlib import Path
 
@@ -76,6 +74,14 @@ def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
         identification.get("data_file"),
         base_dir,
     )
+    cache_cfg = identification.get("observation_matrix_cache")
+    if isinstance(cache_cfg, dict):
+        cache_cfg = deepcopy(cache_cfg)
+        cache_cfg["load_from"] = resolve_path_value(
+            cache_cfg.get("load_from"),
+            base_dir,
+        )
+        identification["observation_matrix_cache"] = cache_cfg
     resolved["identification"] = identification
     return resolved
 
@@ -214,19 +220,6 @@ def _validate(cfg: dict, path: str):
     if ident["feasibility_method"] not in _VALID_FEASIBILITY:
         raise ValueError(f"'feasibility_method' must be one of {_VALID_FEASIBILITY}")
 
-    # Constrained identification requires full 10-per-link parameter blocks,
-    # which are only available with the newton_euler regressor.  The EL
-    # regressor drops zero columns, producing a reduced vector that cannot
-    # be mapped back to per-link pseudo-inertia constraints.
-    if cfg["method"] == "euler_lagrange" and ident["feasibility_method"] != "none":
-        raise ValueError(
-            "Constrained identification (feasibility_method='lmi'/'cholesky') "
-            "is not supported with the euler_lagrange method. The EL regressor "
-            "produces a reduced parameter vector that cannot be mapped to "
-            "per-link pseudo-inertia constraints. Use method='newton_euler' "
-            "for constrained identification, or set feasibility_method='none'."
-        )
-
     # Pipeline partitioning: excitation_only and checkpoint_dir are mutually
     # exclusive run modes.
     if cfg.get("excitation_only") and cfg.get("checkpoint_dir"):
@@ -239,36 +232,6 @@ def _validate(cfg: dict, path: str):
     # Adapted-URDF export (Stage 12) — minimal foot-gun checks on filenames.
     exp = cfg.get("export") or {}
     if exp.get("enabled", False):
-        if cfg["method"] == "euler_lagrange":
-            msg = (
-                "Adapted-URDF export requires method='newton_euler' because "
-                "the Euler-Lagrange path uses a reduced parameter vector that "
-                "cannot be written back as full per-link URDF inertials."
-            )
-            warnings.warn(f"[{path}] {msg}", RuntimeWarning, stacklevel=2)
-            if not sys.stdin.isatty():
-                raise ValueError(
-                    f"[{path}] {msg} Non-interactive runs cannot ask for "
-                    "consent. Use method='newton_euler' or set "
-                    "export.enabled=false."
-                )
-            try:
-                answer = input(
-                    "Continue this run without adapted-URDF export? [y/N] "
-                )
-            except EOFError as exc:
-                raise ValueError(
-                    f"[{path}] Could not read consent. Use "
-                    "method='newton_euler' or set export.enabled=false."
-                ) from exc
-            if answer.strip().lower() not in {"y", "yes"}:
-                raise ValueError(
-                    f"[{path}] Aborted because export.enabled=true is "
-                    "unsupported with method='euler_lagrange'."
-                )
-            exp["enabled"] = False
-            cfg["export"] = exp
-
         for fn_key in ("urdf_filename", "friction_sidecar_filename"):
             v = exp.get(fn_key)
             if v is None:

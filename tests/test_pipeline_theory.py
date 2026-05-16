@@ -512,10 +512,10 @@ def test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures():
     print("  VERIFIED: All standard rigid-body failure conditions detected")
 
 
-def test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes(tmp_path):
+def test_stage_11_euler_lagrange_accepts_constrained_feasibility_modes(tmp_path):
     from src.config_loader import load_config
 
-    cfg_path = tmp_path / "bad_el_lmi.json"
+    cfg_path = tmp_path / "el_lmi.json"
     cfg_path.write_text(
         json.dumps(
             {
@@ -528,11 +528,10 @@ def test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes(tmp_path)
         encoding="utf-8",
     )
 
-    print("\nSTAGE 11: EL method must reject constrained feasibility modes (lmi/cholesky)")
-    with pytest.raises(ValueError, match="euler_lagrange"):
-        load_config(str(cfg_path))
-    print("  ValueError raised matching 'euler_lagrange'")
-    print("  VERIFIED: euler_lagrange + feasibility_method='lmi' is rejected at config load")
+    print("\nSTAGE 11: EL method keeps the full 10-column contract")
+    cfg = load_config(str(cfg_path))
+    assert cfg["identification"]["feasibility_method"] == "lmi"
+    print("  VERIFIED: euler_lagrange + feasibility_method='lmi' is accepted at config load")
 
 
 def test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run(tmp_path):

@@ -11,9 +11,8 @@ The Cholesky path ("cholesky") reparameterises each link's pseudo-inertia
 as J = L Lᵀ where L is lower-triangular, guaranteeing J ≽ 0 by
 construction.  Optimisation is unconstrained in L-space (L-BFGS-B).
 
-Both constrained methods require method="newton_euler" so that the full
-10-per-link parameter structure is preserved.  The config validator rejects
-euler_lagrange + feasibility != "none".
+Constrained methods require a full 10-parameter block per moving link.  The
+pipeline regressor model exposes that public contract for every backend.
 """
 import logging
 import numpy as np
@@ -48,7 +47,7 @@ def solve_identification(W: np.ndarray,
         parameter vector (10 per link).  When "cholesky", the solver
         reparameterises each link's pseudo-inertia as J = L Lᵀ,
         guaranteeing PSD by construction (unconstrained L-BFGS-B).
-        Both require method="newton_euler".
+        Requires a full 10-parameter block per moving link.
     P_mat : (r, p_full) regrouping matrix, required when feasibility_method
         is not "none". Relates W_base @ pi_base = W_full @ pi_full via
         pi_base = P @ pi_full.  The optimisation is then over pi_full.

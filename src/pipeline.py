@@ -10,19 +10,25 @@ import numpy as np
 
 from .base_parameters import compute_base_parameters
 from .config_loader import load_config, load_config_dict
-from .dynamics_euler_lagrange import euler_lagrange_regressor_builder
-from .dynamics_newton_euler import newton_euler_regressor
 from .excitation import optimise_excitation, preflight_excitation_config
 from .feasibility import check_feasibility
 from .friction import friction_param_count
 from .kinematics import RobotKinematics
-from .observation_matrix import build_observation_matrix
+from .observation_matrix import build_observation_matrix, prepare_observation_samples
+from .observation_matrix_cache import (
+    DEFAULT_CACHE_FILENAME,
+    build_cache_metadata,
+    load_observation_matrix_cache,
+    resolve_cache_load_path,
+    save_observation_matrix_cache,
+    validate_cache_for_run,
+)
 from .pipeline_logger import setup_logger
+from .regressor_model import RegressorModel
 from .solver import solve_identification
 from .torque_constraints import (
     build_nominal_parameter_vector,
     compute_torque_design_data,
-    make_augmented_regressor,
     replay_torque_models,
     validation_time_vector,
 )
@@ -223,24 +229,30 @@ class SystemIdentificationPipeline:
         log.info("Initial parameter vector (10n=%d): %s",
                  len(kin.PI), kin.PI.flatten()[:6].tolist())
 
-        # The theory doc treats NE and EL as Stages 4 and 5 respectively;
-        # only one is built per run, so the log line picks the matching label.
-        el_kept_cols = None
-        if cfg["method"] == "newton_euler":
-            log.info("-- Stage 4: Setting up Newton-Euler regressor --")
-            def regressor_fn(q, dq, ddq):
-                return newton_euler_regressor(kin, q, dq, ddq)
-        else:
-            log.info("-- Stage 5: Setting up Euler-Lagrange regressor --")
-            cache_dir = str(self.output_dir / "el_cache")
-            regressor_fn, el_kept_cols = euler_lagrange_regressor_builder(
-                kin, cache_dir
-            )
-            log.info("EL regressor: %d kept columns.", len(el_kept_cols))
-
-        augmented_regressor_fn = make_augmented_regressor(
-            regressor_fn, cfg["friction"]["model"]
+        log.info("-- Stage 4: Building canonical regressor model --")
+        regressor_model = RegressorModel.from_robot(
+            robot,
+            kin,
+            urdf_path=cfg["urdf_path"],
+            friction_model=cfg["friction"]["model"],
+            backend=cfg["method"],
+            cache_dir=self.output_dir / "el_cache",
         )
+        regressor_artifacts = regressor_model.save_artifacts(self.output_dir)
+        log.info(
+            "Regressor model saved: %s",
+            regressor_artifacts["metadata_path"],
+        )
+        if regressor_model.el_kept_cols is not None:
+            log.info(
+                "EL backend wrapped to full columns: kept %d of %d.",
+                len(regressor_model.el_kept_cols),
+                regressor_model.n_rigid_params,
+            )
+
+        regressor_fn = regressor_model.rigid
+        augmented_regressor_fn = regressor_model.augmented
+        el_kept_cols = regressor_model.el_kept_cols
 
         true_nominal_params = self._nominal_parameter_vector(
             kin, el_kept_cols
@@ -254,6 +266,8 @@ class SystemIdentificationPipeline:
             "ddq_lim": ddq_lim,
             "tau_lim": tau_lim,
             "torque_limit_sources": torque_limit_sources,
+            "regressor_model": regressor_model,
+            "regressor_artifacts": regressor_artifacts,
             "regressor_fn": regressor_fn,
             "augmented_regressor_fn": augmented_regressor_fn,
             "el_kept_cols": el_kept_cols,
@@ -311,7 +325,7 @@ class SystemIdentificationPipeline:
                 exc_result = optimise_excitation(
                     kin, iter_cfg, q_lim, dq_lim, ddq_lim,
                     friction_model=cfg["friction"]["model"],
-                    regressor_fn=regressor_fn if cfg["method"] == "euler_lagrange" else None,
+                    regressor_fn=regressor_fn,
                     tau_lim=tau_lim,
                     nominal_params=nominal_params_used,
                 )
@@ -372,7 +386,7 @@ class SystemIdentificationPipeline:
             exc_result = optimise_excitation(
                 kin, cfg["excitation"], q_lim, dq_lim, ddq_lim,
                 friction_model=cfg["friction"]["model"],
-                regressor_fn=regressor_fn if cfg["method"] == "euler_lagrange" else None,
+                regressor_fn=regressor_fn,
                 tau_lim=tau_lim,
                 nominal_params=nominal_params_used if torque_required else None,
             )
@@ -488,6 +502,7 @@ class SystemIdentificationPipeline:
             log.info("Torque validation saved to %s", torque_path)
 
         log.info("-- Stage 12: Saving outputs --")
+        regressor_meta = self._regressor_artifact_summary(ctx)
         results = {
             "pi_identified": identification["pi_identified_full"],
             "pi_base": identification["pi_base"],
@@ -507,6 +522,21 @@ class SystemIdentificationPipeline:
             if torque_limit_sources is not None
             else np.array([], dtype=object),
             "sequential_history": np.array(sequential_history, dtype=object),
+            "regressor_model_path": np.array(regressor_meta["artifact_path"]),
+            "regressor_function_path": np.array(regressor_meta["function_path"]),
+            "regressor_backend": np.array(regressor_meta["backend"]),
+            "regressor_joint_names": np.array(
+                regressor_meta["joint_names"], dtype=object
+            ),
+            "regressor_rigid_parameter_names": np.array(
+                regressor_meta["rigid_parameter_names"], dtype=object
+            ),
+            "regressor_augmented_parameter_names": np.array(
+                regressor_meta["augmented_parameter_names"], dtype=object
+            ),
+            "n_rigid_params": np.int64(regressor_meta["n_rigid_params"]),
+            "n_augmented_params": np.int64(regressor_meta["n_augmented_params"]),
+            "regressor_metadata_json": np.array(json.dumps(regressor_meta)),
         }
         out_path = self.output_dir / "identification_results.npz"
         np.savez(str(out_path), **results)
@@ -557,6 +587,10 @@ class SystemIdentificationPipeline:
                 else torque_summary["worst_time_s"]
             ),
             "sequential_history": sequential_history,
+            "regressor_model": regressor_meta,
+            "observation_matrix_cache": identification.get(
+                "observation_matrix_cache", {"status": "disabled"}
+            ),
         }
         if (torque_summary is not None
                 and torque_summary.get("design_summary") is not None):
@@ -691,10 +725,41 @@ class SystemIdentificationPipeline:
     # Helper methods (formerly closures inside run())
     # ------------------------------------------------------------------
 
+    def _observation_cache_cfg(self):
+        cache_cfg = (
+            self.cfg.get("identification", {})
+            .get("observation_matrix_cache", {})
+            or {}
+        )
+        return {
+            "save": bool(cache_cfg.get("save", False)),
+            "filename": cache_cfg.get("filename", DEFAULT_CACHE_FILENAME),
+            "load_from": cache_cfg.get("load_from"),
+            "force_load": bool(cache_cfg.get("force_load", False)),
+        }
+
+    def _regressor_artifact_summary(self, ctx):
+        model = ctx["regressor_model"]
+        artifacts = ctx["regressor_artifacts"]
+        metadata = model.metadata_dict(
+            urdf_path=artifacts["urdf_path"],
+            artifact_dir=self.output_dir,
+        )
+        return {
+            "artifact_path": artifacts["metadata_path"],
+            "urdf_path": artifacts["urdf_path"],
+            "function_path": artifacts["shim_path"],
+            "backend": metadata["backend"],
+            "joint_names": metadata["joint_names"],
+            "rigid_parameter_names": metadata["rigid_parameter_names"],
+            "augmented_parameter_names": metadata["augmented_parameter_names"],
+            "n_rigid_params": metadata["n_rigid_params"],
+            "n_friction_params": metadata["n_friction_params"],
+            "n_augmented_params": metadata["n_augmented_params"],
+        }
+
     def _rigid_nominal_vector(self, kin, el_kept_cols):
         """Return the rigid-body nominal parameter vector."""
-        if self.cfg["method"] == "euler_lagrange" and el_kept_cols is not None:
-            return kin.PI.flatten()[el_kept_cols]
         return kin.PI.flatten()
 
     def _nominal_parameter_vector(self, kin, el_kept_cols,
@@ -765,20 +830,118 @@ class SystemIdentificationPipeline:
         kin = ctx["kin"]
         regressor_fn = ctx["regressor_fn"]
         el_kept_cols = ctx["el_kept_cols"]
+        pi_full = self._nominal_parameter_vector(kin, el_kept_cols)
+        cache_cfg = self._observation_cache_cfg()
+        cache_summary = {"status": "disabled"}
 
         log.info("-- Stage 8: Building observation matrix --")
-        W, tau_vec = build_observation_matrix(
-            q_data, dq_data, ddq_data, tau_data,
-            regressor_fn, cfg, data_fs
-        )
-        log.info("W shape: %s", W.shape)
+        load_from = cache_cfg.get("load_from")
+        cache_metadata = None
+        samples = None
+        if load_from:
+            samples = prepare_observation_samples(
+                q_data, dq_data, ddq_data, tau_data, cfg, data_fs
+            )
+            expected_metadata = build_cache_metadata(
+                cfg=cfg,
+                n_dof=kin.nDoF,
+                pi_full=pi_full,
+                el_kept_cols=el_kept_cols,
+                samples=samples,
+            )
+            cache_path = resolve_cache_load_path(
+                load_from,
+                cache_cfg.get("filename", DEFAULT_CACHE_FILENAME),
+            )
+            cache = load_observation_matrix_cache(cache_path)
+            mismatches = validate_cache_for_run(
+                cache,
+                expected_metadata,
+                force_load=bool(cache_cfg.get("force_load", False)),
+            )
+            W = cache["W"]
+            W_base = cache["W_base"]
+            P_mat = cache["P_mat"]
+            kept_cols = cache["kept_cols"].tolist()
+            rank = int(cache["rank"])
+            tau_vec = samples["tau_vec"]
+            status = "force_loaded" if mismatches else "loaded"
+            cache_summary = {
+                "status": status,
+                "source_path": str(cache_path),
+                "mismatches": mismatches,
+            }
+            cache_metadata = build_cache_metadata(
+                cfg=cfg,
+                n_dof=kin.nDoF,
+                pi_full=pi_full,
+                el_kept_cols=el_kept_cols,
+                samples=samples,
+                W=W,
+                W_base=W_base,
+                P_mat=P_mat,
+                kept_cols=kept_cols,
+                rank=rank,
+                source_cache_path=str(cache_path),
+                load_status=status,
+                load_mismatches=mismatches,
+            )
+            log.info(
+                "Loaded observation matrix cache: W=%s, W_base=%s",
+                W.shape,
+                W_base.shape,
+            )
+        else:
+            W, tau_vec, samples = build_observation_matrix(
+                q_data, dq_data, ddq_data, tau_data,
+                regressor_fn, cfg, data_fs, return_metadata=True
+            )
+            log.info("W shape: %s", W.shape)
 
-        log.info("-- Stage 9: Base parameter reduction --")
-        pi_full = self._nominal_parameter_vector(kin, el_kept_cols)
-        W_base, P_mat, kept_cols, rank, pi_base = compute_base_parameters(
-            W, pi_full
-        )
-        log.info("Base parameters: %d (from %d full)", rank, len(pi_full))
+            log.info("-- Stage 9: Base parameter reduction --")
+            W_base, P_mat, kept_cols, rank, pi_base = compute_base_parameters(
+                W, pi_full
+            )
+            log.info("Base parameters: %d (from %d full)", rank, len(pi_full))
+            cache_summary = (
+                {"status": "computed"}
+                if cache_cfg.get("save", False)
+                else {"status": "disabled"}
+            )
+            cache_metadata = build_cache_metadata(
+                cfg=cfg,
+                n_dof=kin.nDoF,
+                pi_full=pi_full,
+                el_kept_cols=el_kept_cols,
+                samples=samples,
+                W=W,
+                W_base=W_base,
+                P_mat=P_mat,
+                kept_cols=kept_cols,
+                rank=rank,
+            )
+
+        if load_from:
+            log.info("-- Stage 9: Base parameter reduction (loaded from cache) --")
+            pi_base = P_mat @ pi_full
+
+        if cache_cfg.get("save", False):
+            cache_path = self.output_dir / cache_cfg.get(
+                "filename", DEFAULT_CACHE_FILENAME
+            )
+            save_observation_matrix_cache(
+                cache_path,
+                W=W,
+                W_base=W_base,
+                P_mat=P_mat,
+                kept_cols=kept_cols,
+                rank=rank,
+                tau_vec=tau_vec,
+                samples=samples,
+                metadata=cache_metadata,
+            )
+            cache_summary["path"] = str(cache_path)
+            log.info("Observation matrix cache saved to %s", cache_path)
 
         log.info("-- Stage 10: Solving identification --")
         solver = cfg["identification"]["solver"]
@@ -860,6 +1023,7 @@ class SystemIdentificationPipeline:
             "info": info,
             "solver": solver,
             "n_fric": friction_param_count(kin.nDoF, cfg["friction"]["model"]),
+            "observation_matrix_cache": cache_summary,
         }
 
     def _validate_torque_models(self, ctx, exc_result, nominal_params_used,

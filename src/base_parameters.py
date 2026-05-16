@@ -6,7 +6,8 @@ Implements two-step reduction:
 
 The regrouping matrix ``P`` satisfies ``W @ pi_full = W_base @ (P @ pi_full)``
 so the base observation equation is ``W_base @ pi_base = tau`` where
-``pi_base = P @ pi_full``.
+``pi_base = P @ pi_full``.  ``Wb`` is a common alias for the same matrix:
+``Wb = W[:, kept_cols]``.
 
 Works for both Newton-Euler and Euler-Lagrange regressor matrices.
 """

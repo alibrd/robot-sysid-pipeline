@@ -106,8 +106,12 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `excitation.torque_constraint.*` | object | Method-specific torque settings (uncertainty, envelope, penalty, guard-band, redesign) |
 | `friction.model` | `none` / `viscous` / `coulomb` / `viscous_coulomb` | Friction model |
 | `identification.solver` | `ols` / `wls` / `bounded_ls` | Parameter solver |
-| `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement (requires `method=newton_euler`) |
+| `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement over full 10-parameter rigid-body blocks |
 | `identification.data_file` | file path or `null` | External measurement data (`.npz`) |
+| `identification.observation_matrix_cache.save` | `true` / `false` | Write a reusable Stage 8/9 observation-matrix cache |
+| `identification.observation_matrix_cache.filename` | filename | Cache artifact name, default `observation_matrix_cache.npz` |
+| `identification.observation_matrix_cache.load_from` | path or `null` | Load a cache from a previous pipeline output directory or cache file |
+| `identification.observation_matrix_cache.force_load` | `true` / `false` | Permit cache reuse despite metadata mismatches while recording them in the summary |
 | `filtering.enabled` | `true` / `false` | Zero-phase Butterworth signal filtering |
 | `downsampling.frequency_hz` | float | Downsample frequency (0 = disabled) |
 | `joint_limits.position` | `[[lo,hi], ...]` or `null` | Joint position limits |
@@ -188,7 +192,8 @@ torque limits with this precedence:
     PSD eigenvalue constraints (Wensing et al. 2018). When `"cholesky"`, each
     link's pseudo-inertia is reparameterised as $J = LL^\top$ (lower-triangular
     `L`), guaranteeing PSD by construction, and optimised with L-BFGS-B
-    (Traversaro et al. 2016). Both require `method=newton_euler`
+    (Traversaro et al. 2016). The pipeline exposes full per-link 10-parameter
+    rigid-body blocks to these constrained solvers
 11. **Feasibility check** -- pseudo-inertia PSD per link (the
     necessary-and-sufficient condition for physical consistency). This subsumes
     positive mass, inertia PSD, and triangle-inequality checks, which are still
@@ -211,6 +216,12 @@ torque limits with this precedence:
 All pipeline outputs are written to `<output_dir>/pipeline/`:
 
 - `pipeline.log` -- detailed log of every stage
+- `regressor_model.json` -- regressor metadata including backend, joint names,
+  parameter names, and the rigid/friction parameter counts
+- `regressor_model.urdf` -- resolved URDF snapshot used by the exported
+  regressor model
+- `regressor_function.py` -- importable shim exposing `Y_rigid`,
+  `Y_augmented`, and `Y`
 - `excitation_trajectory.npz` -- optimised trajectory parameters (`params`,
   `freqs`, `q0`, `basis`, `optimize_phase`, `cost`) plus the dense time series
   (`t`, `q`, `dq`, `ddq`, shape `(nDoF, N)`) and joint limits (`q_lim`,
@@ -221,10 +232,14 @@ All pipeline outputs are written to `<output_dir>/pipeline/`:
   is enabled; hard methods also store design margins and chance quantiles when
   applicable, and `sequential_redesign` stores redesign history
 - `identification_results.npz` -- identified parameters, P matrix, residuals,
-  torque-method metadata, and sequential redesign history when applicable
-- `results_summary.json` -- human-readable summary including torque compliance
-  flags, max normalized torque ratio, worst joint/time, and redesign history
+  torque-method metadata, regressor metadata, and sequential redesign history
   when applicable
+- `results_summary.json` -- human-readable summary including torque compliance
+  flags, max normalized torque ratio, worst joint/time, regressor/cache
+  metadata, and redesign history when applicable
+- `observation_matrix_cache.npz` -- optional cache of `W`, `W_base`, `P`,
+  rank, kept columns, samples, and compatibility metadata; written when
+  `identification.observation_matrix_cache.save=true`
 - `checkpoint.npz` -- serialized excitation and trajectory data for pipeline
   resume (only produced by excitation-only runs)
 - `checkpoint_config.json` -- snapshot of the merged pipeline config at the time
@@ -324,7 +339,9 @@ real measured data.
 | `excitation.py` | Trajectory parameter optimisation (`log10` condition number), preflight checks, and SLSQP dispatch |
 | `torque_constraints.py` | Torque-limit design helpers, replay validation, and torque summaries |
 | `observation_matrix.py` | Stack per-sample regressors into the observation matrix |
+| `observation_matrix_cache.py` | Save, load, and validate reusable Stage 8/9 observation-matrix caches |
 | `base_parameters.py` | QR-based column-pivoted reduction to identifiable parameters |
+| `regressor_model.py` | Full-column regressor wrapper and exported regressor artifact loader |
 | `solver.py` | OLS, WLS, bounded LS, constrained LS (SLSQP/LMI), and Cholesky-reparameterised LS (L-BFGS-B) |
 | `feasibility.py` | Post-hoc physical feasibility checks, LMI projection, and Cholesky helpers |
 | `filtering.py` | Zero-phase Butterworth filtering and downsampling |
@@ -344,11 +361,10 @@ real measured data.
 
 - **Excitation constraints**: joint-space limits and torque-limited excitation
   are supported. Cartesian/workspace constraints are not implemented
-- **Constrained identification**: requires `method=newton_euler`. The
-  Euler-Lagrange regressor drops structurally zero columns, so the reduced
-  parameter vector cannot be mapped to per-link pseudo-inertia constraints. The
-  config validator rejects `method=euler_lagrange` with
-  `feasibility_method != "none"`
+- **Constrained identification**: requires full 10-parameter rigid-body blocks.
+  The Euler-Lagrange symbolic builder prunes structural zero columns internally,
+  while the public regressor wrapper restores the full parameter contract before
+  identification and feasibility checks
 - **Sine basis endpoint guarantee**: `dq(T) = 0` and `ddq(T) = 0` for
   sine-only basis hold only when `trajectory_duration_periods` is an integer.
   The config validator enforces this

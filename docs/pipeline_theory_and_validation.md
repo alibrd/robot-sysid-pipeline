@@ -36,8 +36,8 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 | QR-based base-parameter reduction | Supported |
 | OLS / WLS / bounded least squares | Supported |
 | Pseudo-inertia feasibility check | Supported |
-| Constrained identification with pseudo-inertia PSD (LMI) | Supported for `newton_euler` only |
-| Cholesky-factored feasibility reparameterization | Supported for `newton_euler` only |
+| Constrained identification with pseudo-inertia PSD (LMI) | Supported |
+| Cholesky-factored feasibility reparameterization | Supported |
 | Torque-limited excitation (`nominal_hard`, `soft_penalty`, `robust_box`, `chance`, `actuator_envelope`, `sequential_redesign`) | Supported |
 | Unified single-config runner for pipeline, validation, report, benchmark, and plot stages | Supported |
 | Cartesian / workspace excitation constraints | **Not implemented** |
@@ -406,7 +406,7 @@ STAGE 4 & 5 (slow): NE/EL torque agreement across 10 random states (2-DoF RRBot)
 ```
 
 ### Current implementation note
-The EL branch returns a reduced symbolic regressor after removing structurally zero columns (i.e. columns that are literal zero in their symbolic form, without invoking symbolic reasoning such as `equals` or `simplify`). Columns that are algebraically zero but not yet simplified are left in place and handled later by the numeric base-parameter reduction in Stage 9. This is mathematically fine for unconstrained identification, but it means the current EL path cannot support the per-link full-parameter feasibility constraints used by the pseudo-inertia method in Stage 11.
+The EL symbolic builder returns a reduced symbolic regressor after removing structurally zero columns (i.e. columns that are literal zero in their symbolic form, without invoking symbolic reasoning such as `equals` or `simplify`). Columns that are algebraically zero but not yet simplified are left in place and handled later by the numeric base-parameter reduction in Stage 9. The public `RegressorModel` wrapper reinserts the pruned columns before downstream pipeline stages, preserving the full per-link 10-parameter contract used by Stage 11 feasibility constraints.
 
 ## Stage 6. Build the Excitation Trajectory and Choose an Optimization Style
 
@@ -1116,6 +1116,9 @@ STAGE 8: Filtering must happen before downsampling
 
 - Existing sample-sufficiency rejection: [`tests/test_pipeline.py`](../tests/test_pipeline.py)
 
+### Current implementation note
+An optional observation-matrix cache can store the expensive Stage 8/9 products: `W`, `W_base`, `P`, rank, kept columns, filtered/downsampled samples, and compatibility metadata. The cache intentionally excludes identified parameters. Strict loading validates method, friction model, URDF fingerprint, nominal-parameter fingerprint, filter/downsampling settings, sample fingerprints, and matrix shapes; forced loading records mismatches in the run summary.
+
 ## Stage 9. Reduce the Full Model to Base Parameters
 
 ### Governing equations
@@ -1292,7 +1295,7 @@ $$
 
 This criterion implies positive mass, a positive-semidefinite inertia tensor, and the triangle inequalities on the principal moments. See Sousa and Cortesão (2014) and Wensing, Kim, and Slotine (2018).
 
-The constrained identification problem used by the Newton-Euler branch has two solver paths.
+The constrained identification problem operates on the full per-link 10-parameter rigid-body blocks exposed by the pipeline regressor model and has two solver paths.
 
 **LMI path** (`feasibility_method="lmi"`): explicit eigenvalue inequality constraints solved via SLSQP:
 
@@ -1314,12 +1317,13 @@ where $\pi_{full}$ is reconstructed from each link's $J_i = L_i L_i^\top$ via th
 ### Code path
 - Feasibility checks, PSD projection, and parameter extraction: [`src/feasibility.py`](../src/feasibility.py)
 - Constrained solver (LMI via SLSQP, Cholesky via L-BFGS-B): [`src/solver.py`](../src/solver.py)
+- Full-column regressor contract: [`src/regressor_model.py`](../src/regressor_model.py)
 - Config validation: [`src/config_loader.py`](../src/config_loader.py)
 
 The code offers:
 - post-hoc feasibility diagnostics for any parameter vector with complete 10-parameter link blocks,
-- constrained full-space SLSQP with pseudo-inertia eigenvalue constraints (`"lmi"`) for `method="newton_euler"`,
-- Cholesky-reparameterised unconstrained L-BFGS-B optimisation (`"cholesky"`) for `method="newton_euler"`,
+- constrained full-space SLSQP with pseudo-inertia eigenvalue constraints (`"lmi"`),
+- Cholesky-reparameterised unconstrained L-BFGS-B optimisation (`"cholesky"`),
 - PSD projection by eigenvalue clipping when post-hoc correction is requested.
 
 ### Verification evidence
@@ -1340,18 +1344,17 @@ STAGE 11: Pseudo-inertia checks must detect physically invalid bodies
   VERIFIED: All standard rigid-body failure conditions detected
 ```
 
-**What is verified**: The Euler-Lagrange method rejects constrained feasibility modes (`lmi`, `cholesky`) at config load.
+**What is verified**: The Euler-Lagrange backend is wrapped back to the full 10-column-per-link public parameter contract, so constrained feasibility modes are accepted at config load.
 
 **Run**:
 ```bash
-pytest tests/test_pipeline_theory.py::test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes -v -s
+pytest tests/test_pipeline_theory.py::test_stage_11_euler_lagrange_accepts_constrained_feasibility_modes -v -s
 ```
 
 **Expected output** (excerpt):
 ```
-STAGE 11: EL method must reject constrained feasibility modes (lmi/cholesky)
-  ValueError raised matching 'euler_lagrange'
-  VERIFIED: euler_lagrange + feasibility_method='lmi' is rejected at config load
+STAGE 11: EL method keeps the full 10-column contract
+  VERIFIED: euler_lagrange + feasibility_method='lmi' is accepted at config load
 ```
 
 **What is verified**: The pseudo-inertia roundtrip $\pi \to J \to \pi$ recovers the original parameter vector.
@@ -1403,14 +1406,18 @@ STAGE 12: LMI-constrained NE identification must return a feasible model
 ### Current implementation note
 - `feasibility_method="lmi"` uses SLSQP with explicit eigenvalue inequality constraints on $J_i$.
 - `feasibility_method="cholesky"` reparameterises $J_i = L_i L_i^\top$ and uses unconstrained L-BFGS-B with analytical gradients, following Traversaro et al. (2016). This guarantees $J_i \succeq 0$ by construction throughout optimisation.
-- The EL branch cannot use either constrained feasibility path because its reduced symbolic regressor cannot be mapped back to full per-link 10-parameter blocks in the current implementation.
-- If a reduced parameter vector has fewer than $10n$ entries, `check_feasibility()` cannot perform complete per-link pseudo-inertia checks on missing blocks.
+- The EL symbolic builder still prunes structural zero columns internally for efficiency, but the public `RegressorModel` wrapper reinserts those columns before the matrix reaches pipeline stages.
+- All pipeline backends now expose full per-link 10-parameter blocks to `check_feasibility()`.
 
 ## Stage 12. Save Outputs, Write Logs, Optionally Export an Adapted URDF, and Interpret Success Correctly
 
 ### Output artifacts
 The pipeline writes:
 - `pipeline.log`
+- `regressor_model.json`
+- `regressor_model.urdf`
+- `regressor_function.py`
+- `observation_matrix_cache.npz` when observation-matrix cache saving is enabled
 - `excitation_trajectory.npz`
 - `torque_limit_validation.npz` when torque-constrained replay is produced
 - `identification_results.npz`
@@ -1668,11 +1675,13 @@ tests/test_urdf_export.py::test_pybullet_round_trip_consistency PASSED   # --run
 | 8 | $W$ is stacked exactly as the theory states | [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_observation_matrix_matches_manual_stacking_equation` |
 | 8 | Filtering happens before downsampling | [`src/filtering.py`](../src/filtering.py), [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_filtering_happens_before_downsampling` |
 | 8 | Torque-limited excitation settings do not change the observation-matrix construction | [`src/observation_matrix.py`](../src/observation_matrix.py) | `test_stage_8_observation_matrix_is_unchanged_by_torque_config` |
+| 8-9 | Observation-matrix caches store reusable matrix/reduction artifacts and validate compatibility | [`src/observation_matrix_cache.py`](../src/observation_matrix_cache.py), [`src/pipeline.py`](../src/pipeline.py) | `tests/test_observation_matrix_cache.py` |
 | 9 | Base reduction preserves the observation equation | [`src/base_parameters.py`](../src/base_parameters.py) | `test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_and_el`, `test_slow_base_parameter_reduction_preserves_multiple_random_default_observation_matrices` |
 | 10 | Parameter bounds switch the pipeline into bounded LS | [`src/pipeline.py`](../src/pipeline.py), [`src/solver.py`](../src/solver.py) | `test_stage_10_parameter_bounds_enable_bounded_ls` |
 | 10 | OLS recovers exact base parameters from noiseless data | [`src/solver.py`](../src/solver.py) | `test_stage_10_ols_recovers_exact_base_parameters_from_noiseless_data` |
 | 11 | Pseudo-inertia detects physically invalid bodies | [`src/feasibility.py`](../src/feasibility.py) | `test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures` |
-| 11 | EL constrained feasibility modes are rejected honestly | [`src/config_loader.py`](../src/config_loader.py) | `test_stage_11_euler_lagrange_rejects_constrained_feasibility_modes` |
+| 11 | Regressor models expose full rigid and friction-augmented parameter contracts | [`src/regressor_model.py`](../src/regressor_model.py) | `tests/test_regressor_model.py` |
+| 11 | EL constrained feasibility modes are accepted through the full-column wrapper | [`src/config_loader.py`](../src/config_loader.py), [`src/regressor_model.py`](../src/regressor_model.py) | `test_stage_11_euler_lagrange_accepts_constrained_feasibility_modes` |
 | 11 | Pseudo-inertia roundtrip $\pi \to J \to \pi$ | [`src/feasibility.py`](../src/feasibility.py) | `test_stage_11_pseudo_inertia_roundtrip` |
 | 11 | Cholesky solver guarantees $J \succeq 0$ | [`src/solver.py`](../src/solver.py) | `test_stage_11_cholesky_solver_guarantees_psd` |
 | 12 | Successful execution is distinct from physical feasibility | [`src/pipeline.py`](../src/pipeline.py) | `test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run` |

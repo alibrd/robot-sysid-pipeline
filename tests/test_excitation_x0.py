@@ -190,6 +190,7 @@ def test_pipeline_passes_excitation_config_to_stage_5(tmp_path, monkeypatch):
 
     def stop_after_stage_5(kin, cfg_exc, q_lim, dq_lim, ddq_lim, **kwargs):
         captured["cfg_exc"] = deepcopy(cfg_exc)
+        captured["regressor_fn"] = kwargs.get("regressor_fn")
         raise RuntimeError("STOP_AFTER_STAGE_5")
 
     monkeypatch.setattr("src.pipeline.optimise_excitation", stop_after_stage_5)
@@ -201,3 +202,4 @@ def test_pipeline_passes_excitation_config_to_stage_5(tmp_path, monkeypatch):
     assert captured["cfg_exc"]["basis_functions"] == "both"
     assert captured["cfg_exc"]["optimize_phase"] is False
     assert captured["cfg_exc"]["trajectory_duration_periods"] == 24
+    assert captured["regressor_fn"] is not None

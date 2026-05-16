@@ -284,8 +284,8 @@ class TestTrajectoryBoundary:
         finally:
             os.unlink(tmp)
 
-    def test_el_with_constrained_identification_rejected(self):
-        """EL + lmi/cholesky must be rejected at config validation."""
+    def test_el_with_constrained_identification_is_accepted(self):
+        """EL uses a full-column wrapper, so constrained modes are config-valid."""
         from src.config_loader import load_config
         import tempfile, os
         for feas in ("lmi", "cholesky"):
@@ -300,8 +300,8 @@ class TestTrajectoryBoundary:
                 json.dump(cfg_data, f)
                 tmp = f.name
             try:
-                with pytest.raises(ValueError, match="euler_lagrange"):
-                    load_config(tmp)
+                cfg = load_config(tmp)
+                assert cfg["identification"]["feasibility_method"] == feas
             finally:
                 os.unlink(tmp)
 
