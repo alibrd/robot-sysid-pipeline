@@ -6,13 +6,15 @@
   "stages": {
         "excitation": true,
         "identification": true,
-        "validation_pybullet": true,
+        "validation": true,
         "report": true,
         "benchmark": false,
         "plot": true
     },
+    "checkpoint": null,
 
-    "validation_pybullet": {
+    "validation": {
+        "source": "pybullet",
         "sample_rate_hz": 0,
         "gravity": [0.0, 0.0, -9.80665],
         "use_fixed_base": true,
@@ -70,10 +72,10 @@
     "model": "viscous_coulomb"
   },
   "identification": {
+    "source": "excitation",
     "solver": "ols",
     "parameter_bounds": false,
-    "feasibility_method": "cholesky",
-    "data_file": null
+    "feasibility_method": "cholesky"
   },
   "excitation": {
     "basis_functions": "both",

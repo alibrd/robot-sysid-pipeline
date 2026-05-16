@@ -46,14 +46,53 @@ def _write_excitation_artifact(path: Path,
     return path
 
 
+def _write_measurements_npz(path: Path,
+                             n_dof: int,
+                             n_samples: int = 32,
+                             fs: float = 50.0,
+                             tau_scale: float = 0.1) -> Path:
+    """Write a minimal pipeline-compatible measurements .npz."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    q = rng.uniform(-0.5, 0.5, size=(n_samples, n_dof))
+    dq = rng.uniform(-0.5, 0.5, size=(n_samples, n_dof))
+    ddq = rng.uniform(-0.5, 0.5, size=(n_samples, n_dof))
+    tau = tau_scale * rng.standard_normal(size=(n_samples, n_dof))
+    np.savez(str(path), q=q, dq=dq, ddq=ddq, tau=tau, fs=fs)
+    return path
+
+
+def _write_identification_results_npz(path: Path,
+                                      n_dof: int,
+                                      friction_model: str = "none") -> Path:
+    """Write a minimal identification_results.npz so MeasurementValidationRunner can load it."""
+    from src.friction import friction_param_count
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n_params = n_dof * 10 + friction_param_count(n_dof, friction_model)
+    rng = np.random.default_rng(1)
+    pi = rng.standard_normal(n_params) * 0.01
+    np.savez(
+        str(path),
+        pi_corrected=pi,
+        pi_identified=pi,
+        method=np.array("newton_euler"),
+        friction_model=np.array(friction_model),
+        nDoF=np.int64(n_dof),
+        feasible=np.bool_(True),
+        residual=np.float64(0.0),
+    )
+    return path
+
+
 def _make_unified_cfg(tmp_path: Path,
                       *,
                       urdf_path: Path,
                       output_dir: str | None = None,
                       stages: dict | None = None,
-                      resume_from: str | None = None,
+                      checkpoint: str | None = None,
                       excitation_overrides: dict | None = None,
                       validation_overrides: dict | None = None,
+                      identification_overrides: dict | None = None,
                       friction_model: str = "none",
                       joint_limits: dict | None = None) -> Path:
     if output_dir is None:
@@ -61,7 +100,7 @@ def _make_unified_cfg(tmp_path: Path,
     stages_block = {
         "excitation": True,
         "identification": False,
-        "validation_pybullet": False,
+        "validation": False,
         "report": False,
         "benchmark": False,
         "plot": False,
@@ -79,27 +118,30 @@ def _make_unified_cfg(tmp_path: Path,
     }
     if excitation_overrides:
         excitation_block.update(excitation_overrides)
+    identification_block = {
+        "source": "excitation",
+        "solver": "ols",
+        "parameter_bounds": False,
+        "feasibility_method": "none",
+    }
+    if identification_overrides:
+        identification_block.update(identification_overrides)
     payload = {
         "urdf_path": str(urdf_path),
         "output_dir": output_dir,
         "method": "newton_euler",
         "stages": stages_block,
-        "resume": {"from_checkpoint": resume_from},
+        "checkpoint": checkpoint,
         "excitation": excitation_block,
         "friction": {"model": friction_model},
-        "identification": {
-            "solver": "ols",
-            "parameter_bounds": False,
-            "feasibility_method": "none",
-            "data_file": None,
-        },
+        "identification": identification_block,
         "filtering": {"enabled": False},
         "downsampling": {"frequency_hz": 0},
     }
     if joint_limits is not None:
         payload["joint_limits"] = joint_limits
     if validation_overrides is not None:
-        payload["validation_pybullet"] = validation_overrides
+        payload["validation"] = validation_overrides
     return _write_json(tmp_path / "unified.json", payload)
 
 
@@ -142,7 +184,7 @@ def test_validation_stage_fails_clearly_when_pybullet_missing(tmp_path, monkeypa
         stages={
             "excitation": True,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
         },
     )
 
@@ -165,9 +207,10 @@ def test_validation_inputs_are_derived_from_unified_config(tmp_path, monkeypatch
         stages={
             "excitation": True,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
         },
         validation_overrides={
+            "source": "pybullet",
             "sample_rate_hz": 120.0,
             "comparison": {
                 "tolerance_abs": 1e-3,
@@ -181,6 +224,7 @@ def test_validation_inputs_are_derived_from_unified_config(tmp_path, monkeypatch
     runner = UnifiedRunner(str(cfg_path))
     ctx = runner._validate_and_prepare()
 
+    assert ctx["validation_backend"] == "pybullet"
     assert ctx["validation_cfg"]["urdf_path"] == str(URDF_RRBOT.resolve())
     assert Path(ctx["validation_cfg"]["excitation_file"]) == (
         tmp_path / "out" / "pipeline" / "excitation_trajectory.npz"
@@ -222,9 +266,9 @@ def test_resume_uses_checkpoint_excitation_metadata(tmp_path, monkeypatch):
         stages={
             "excitation": False,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
         },
-        resume_from=str(prev_run),
+        checkpoint=str(prev_run),
         excitation_overrides={
             "base_frequency_hz": 0.5,
             "trajectory_duration_periods": 2,
@@ -270,9 +314,9 @@ def test_resume_rejects_mismatched_checkpoint_metadata(tmp_path, monkeypatch):
         stages={
             "excitation": False,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
         },
-        resume_from=str(prev_run),
+        checkpoint=str(prev_run),
     )
 
     monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
@@ -290,17 +334,17 @@ def test_validation_without_excitation_fails_preflight(tmp_path, monkeypatch):
         stages={
             "excitation": False,
             "identification": False,
-            "validation_pybullet": True,
+            "validation": True,
         },
     )
 
     monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
 
-    with pytest.raises(ValueError, match="validation_pybullet"):
+    with pytest.raises(ValueError, match="validation"):
         UnifiedRunner(str(cfg_path))._validate_and_prepare()
 
 
-def test_identification_only_requires_resume_checkpoint(tmp_path, monkeypatch):
+def test_identification_only_requires_checkpoint(tmp_path, monkeypatch):
     from src.runner import UnifiedRunner
 
     cfg_path = _make_unified_cfg(
@@ -309,17 +353,17 @@ def test_identification_only_requires_resume_checkpoint(tmp_path, monkeypatch):
         stages={
             "excitation": False,
             "identification": True,
-            "validation_pybullet": False,
+            "validation": False,
         },
     )
 
     monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
 
-    with pytest.raises(ValueError, match="requires resume.from_checkpoint"):
+    with pytest.raises(ValueError, match="requires 'checkpoint'"):
         UnifiedRunner(str(cfg_path))._validate_and_prepare()
 
 
-def test_excitation_and_resume_together_are_rejected(tmp_path, monkeypatch):
+def test_excitation_and_checkpoint_together_are_rejected(tmp_path, monkeypatch):
     from src.runner import UnifiedRunner
 
     cfg_path = _make_unified_cfg(
@@ -329,12 +373,12 @@ def test_excitation_and_resume_together_are_rejected(tmp_path, monkeypatch):
             "excitation": True,
             "identification": True,
         },
-        resume_from=str(tmp_path / "prev_run"),
+        checkpoint=str(tmp_path / "prev_run"),
     )
 
     monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
 
-    with pytest.raises(ValueError, match="resume.from_checkpoint is incompatible"):
+    with pytest.raises(ValueError, match="'checkpoint' is incompatible"):
         UnifiedRunner(str(cfg_path))._validate_and_prepare()
 
 
@@ -347,7 +391,7 @@ def test_unified_config_rejects_pipeline_mode_keys_at_top_level(tmp_path):
         stages={
             "excitation": True,
             "identification": False,
-            "validation_pybullet": False,
+            "validation": False,
         },
     )
     payload = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -358,7 +402,7 @@ def test_unified_config_rejects_pipeline_mode_keys_at_top_level(tmp_path):
         UnifiedRunner(str(cfg_path))._validate_and_prepare()
 
 
-def test_validation_only_can_reuse_resume_excitation_artifact(tmp_path, monkeypatch):
+def test_validation_only_can_reuse_checkpoint_excitation_artifact(tmp_path, monkeypatch):
     from src.runner import UnifiedRunner
 
     prev_run = tmp_path / "prev_run"
@@ -389,9 +433,9 @@ def test_validation_only_can_reuse_resume_excitation_artifact(tmp_path, monkeypa
         stages={
             "excitation": False,
             "identification": False,
-            "validation_pybullet": True,
+            "validation": True,
         },
-        resume_from=str(prev_run),
+        checkpoint=str(prev_run),
     )
 
     monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
@@ -416,7 +460,7 @@ def test_output_dir_lays_out_subdirectories(tmp_path, monkeypatch):
         stages={
             "excitation": True,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
             "benchmark": False,
         },
     )
@@ -430,7 +474,7 @@ def test_output_dir_lays_out_subdirectories(tmp_path, monkeypatch):
     assert Path(ctx["validation_cfg"]["output_dir"]) == (
         tmp_path / "all_outputs" / "validation"
     )
-    for runner_key in ("stages", "resume", "validation_pybullet", "plot", "report", "benchmark"):
+    for runner_key in ("stages", "checkpoint", "validation", "plot", "report", "benchmark"):
         assert runner_key not in ctx["pipeline_cfg"], (
             f"Runner-only key '{runner_key}' must not appear in the pipeline config dict"
         )
@@ -460,7 +504,7 @@ def test_report_stage_uses_validation_dir(tmp_path, monkeypatch):
         stages={
             "excitation": False,
             "identification": False,
-            "validation_pybullet": False,
+            "validation": False,
             "report": True,
         },
     )
@@ -493,7 +537,7 @@ def test_benchmark_stage_uses_output_dir_validation(tmp_path, monkeypatch):
         stages={
             "excitation": False,
             "identification": False,
-            "validation_pybullet": False,
+            "validation": False,
             "report": False,
             "benchmark": True,
         },
@@ -522,9 +566,9 @@ def test_unified_relative_paths_resolve_from_config_dir(tmp_path, monkeypatch):
             "stages": {
                 "excitation": True,
                 "identification": True,
-                "validation_pybullet": False,
+                "validation": False,
             },
-            "resume": {"from_checkpoint": None},
+            "checkpoint": None,
             "excitation": {
                 "basis_functions": "cosine",
                 "num_harmonics": 1,
@@ -535,9 +579,9 @@ def test_unified_relative_paths_resolve_from_config_dir(tmp_path, monkeypatch):
             },
             "friction": {"model": "none"},
             "identification": {
+                "source": "excitation",
                 "solver": "ols",
                 "feasibility_method": "none",
-                "data_file": None,
             },
         },
     )
@@ -562,7 +606,7 @@ def test_friction_pipeline_warns_validation(tmp_path, monkeypatch):
         stages={
             "excitation": True,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
         },
         friction_model="viscous",
         joint_limits=rrbot_limits,
@@ -575,6 +619,214 @@ def test_friction_pipeline_warns_validation(tmp_path, monkeypatch):
     notes = ctx["validation_cfg"].get("_workflow_notes", [])
     assert len(notes) >= 1
     assert "friction" in notes[0].lower()
+
+
+# ----------------------------------------------------------------------
+# New source-combination tests (Mode 1 / Mode 2 / mixed)
+# ----------------------------------------------------------------------
+
+
+def test_id_source_path_dispatches_measurement_input(tmp_path, monkeypatch):
+    """identification.source = <path> must translate to internal data_file."""
+    from src.runner import UnifiedRunner
+
+    meas_path = _write_measurements_npz(tmp_path / "data" / "measurements.npz", n_dof=2)
+
+    cfg_path = _make_unified_cfg(
+        tmp_path,
+        urdf_path=URDF_RRBOT,
+        output_dir=str(tmp_path / "out"),
+        stages={
+            "excitation": False,
+            "identification": True,
+            "validation": False,
+        },
+        identification_overrides={"source": str(meas_path)},
+    )
+
+    monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
+
+    runner = UnifiedRunner(str(cfg_path))
+    ctx = runner._validate_and_prepare()
+
+    pipeline_cfg = ctx["pipeline_cfg"]
+    assert pipeline_cfg["identification"]["data_file"] == str(meas_path.resolve())
+    assert "source" not in pipeline_cfg["identification"]
+    assert pipeline_cfg["excitation_only"] is False
+
+
+def test_id_source_path_auto_disables_excitation_stage(tmp_path, monkeypatch):
+    """Mode-2 identification ignores an enabled excitation stage."""
+    from src.runner import UnifiedRunner
+
+    meas_path = _write_measurements_npz(tmp_path / "data" / "measurements.npz", n_dof=2)
+
+    cfg_path = _make_unified_cfg(
+        tmp_path,
+        urdf_path=URDF_RRBOT,
+        output_dir=str(tmp_path / "out"),
+        stages={
+            "excitation": True,
+            "identification": True,
+            "validation": False,
+        },
+        identification_overrides={"source": str(meas_path)},
+    )
+
+    monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
+
+    runner = UnifiedRunner(str(cfg_path))
+    with pytest.warns(UserWarning, match="ignored"):
+        ctx = runner._validate_and_prepare()
+
+    assert runner.cfg["stages"]["excitation"] is False
+    assert ctx["run_pipeline"] is True
+    assert ctx["pipeline_cfg"]["excitation_only"] is False
+    assert ctx["pipeline_cfg"]["checkpoint_dir"] is None
+    assert ctx["pipeline_cfg"]["identification"]["data_file"] == str(meas_path.resolve())
+
+
+def test_val_source_path_dispatches_measurement_validation(tmp_path, monkeypatch):
+    """validation.source = <path> must route to MeasurementValidationRunner."""
+    from src.runner import UnifiedRunner
+
+    meas_in = _write_measurements_npz(
+        tmp_path / "data" / "measurements.npz", n_dof=2
+    )
+    val_in = _write_measurements_npz(
+        tmp_path / "val" / "measurements.npz", n_dof=2
+    )
+    # Pre-write identification results so the runner accepts validation-only.
+    _write_identification_results_npz(
+        tmp_path / "out" / "pipeline" / "identification_results.npz",
+        n_dof=2,
+    )
+
+    cfg_path = _make_unified_cfg(
+        tmp_path,
+        urdf_path=URDF_RRBOT,
+        output_dir=str(tmp_path / "out"),
+        stages={
+            "excitation": False,
+            "identification": False,
+            "validation": True,
+        },
+        identification_overrides={"source": str(meas_in)},
+        validation_overrides={"source": str(val_in)},
+    )
+
+    monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
+
+    ctx = UnifiedRunner(str(cfg_path))._validate_and_prepare()
+    assert ctx["validation_backend"] == "measurements"
+    assert ctx["validation_cfg"]["measurements_path"] == str(val_in.resolve())
+    assert ctx["validation_cfg"]["urdf_path"] == str(URDF_RRBOT.resolve())
+
+
+def test_id_path_val_pybullet_is_rejected(tmp_path, monkeypatch):
+    """Mode-2 identification with PyBullet validation is explicitly unsupported."""
+    from src.runner import UnifiedRunner
+
+    meas_in = _write_measurements_npz(
+        tmp_path / "data" / "measurements.npz", n_dof=2
+    )
+
+    cfg_path = _make_unified_cfg(
+        tmp_path,
+        urdf_path=URDF_RRBOT,
+        stages={
+            "excitation": False,
+            "identification": True,
+            "validation": True,
+        },
+        identification_overrides={"source": str(meas_in)},
+        validation_overrides={"source": "pybullet"},
+    )
+
+    monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
+
+    with pytest.raises(ValueError, match="not supported"):
+        UnifiedRunner(str(cfg_path))._validate_and_prepare()
+
+
+def test_id_excitation_val_path_combines_synth_id_with_real_validation(tmp_path, monkeypatch):
+    """Synthetic identification + real-measurement validation must work end-to-end."""
+    from src.runner import UnifiedRunner
+
+    val_in = _write_measurements_npz(
+        tmp_path / "val" / "measurements.npz", n_dof=2
+    )
+
+    cfg_path = _make_unified_cfg(
+        tmp_path,
+        urdf_path=URDF_RRBOT,
+        output_dir=str(tmp_path / "out"),
+        stages={
+            "excitation": True,
+            "identification": True,
+            "validation": True,
+        },
+        validation_overrides={"source": str(val_in)},
+    )
+
+    monkeypatch.setattr("src.runner._is_module_available", lambda name: True)
+
+    ctx = UnifiedRunner(str(cfg_path))._validate_and_prepare()
+    assert ctx["validation_backend"] == "measurements"
+    assert ctx["validation_cfg"]["measurements_path"] == str(val_in.resolve())
+    assert ctx["pipeline_cfg"]["identification"]["data_file"] is None
+
+
+def test_removed_keys_raise_helpful_error(tmp_path):
+    """Old top-level keys (resume / validation_pybullet) must fail loudly."""
+    from src.runner import UnifiedRunner
+
+    for legacy_block, expected in [
+        ({"resume": {"from_checkpoint": None}}, "checkpoint"),
+        ({"validation_pybullet": {"sample_rate_hz": 0}}, "validation_pybullet"),
+        ({"report": {}}, "report"),
+        ({"benchmark": {}}, "benchmark"),
+    ]:
+        payload = {
+            "urdf_path": str(URDF_RRBOT),
+            "output_dir": str(tmp_path / "out"),
+            "method": "newton_euler",
+            "stages": {
+                "excitation": True,
+                "identification": False,
+                "validation": False,
+            },
+            "identification": {"source": "excitation"},
+            **legacy_block,
+        }
+        cfg_path = _write_json(tmp_path / f"legacy_{expected}.json", payload)
+        with pytest.raises(ValueError, match=expected):
+            UnifiedRunner(str(cfg_path))._validate_and_prepare()
+
+
+def test_id_data_file_is_rejected_with_helpful_error(tmp_path):
+    """identification.data_file (legacy) must point users at identification.source."""
+    from src.runner import UnifiedRunner
+
+    payload = {
+        "urdf_path": str(URDF_RRBOT),
+        "output_dir": str(tmp_path / "out"),
+        "method": "newton_euler",
+        "stages": {
+            "excitation": True,
+            "identification": True,
+            "validation": False,
+        },
+        "identification": {"data_file": None, "solver": "ols", "feasibility_method": "none"},
+    }
+    cfg_path = _write_json(tmp_path / "legacy_data_file.json", payload)
+    with pytest.raises(ValueError, match="identification.source"):
+        UnifiedRunner(str(cfg_path))._validate_and_prepare()
+
+
+# ----------------------------------------------------------------------
+# Pre-existing end-to-end tests (PyBullet smoke tests)
+# ----------------------------------------------------------------------
 
 
 @pytest.mark.skipif(
@@ -592,7 +844,7 @@ def test_unified_end_to_end_pendulum(tmp_path):
         stages={
             "excitation": True,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
             "report": True,
             "benchmark": True,
         },
@@ -605,6 +857,7 @@ def test_unified_end_to_end_pendulum(tmp_path):
             "trajectory_duration_periods": 1,
         },
         validation_overrides={
+            "source": "pybullet",
             "sample_rate_hz": 100.0,
             "comparison": {
                 "tolerance_abs": 1e-4,
@@ -656,7 +909,7 @@ def test_unified_end_to_end_rrbot_2dof(tmp_path):
         stages={
             "excitation": True,
             "identification": True,
-            "validation_pybullet": True,
+            "validation": True,
             "report": True,
             "benchmark": True,
         },
@@ -669,6 +922,7 @@ def test_unified_end_to_end_rrbot_2dof(tmp_path):
             "trajectory_duration_periods": 1,
         },
         validation_overrides={
+            "source": "pybullet",
             "sample_rate_hz": 100.0,
             "comparison": {
                 "tolerance_abs": 1e-4,
@@ -699,9 +953,9 @@ def test_unified_end_to_end_elbow(tmp_path):
             "stages": {
                 "excitation": True,
                 "identification": True,
-                "validation_pybullet": True,
+                "validation": True,
             },
-            "resume": {"from_checkpoint": None},
+            "checkpoint": None,
             "joint_limits": {
                 "position": [[-3.14159, 3.14159], [-1.5708, 1.5708], [-1.5708, 1.5708]],
                 "velocity": [[-3.0, 3.0], [-3.0, 3.0], [-3.0, 3.0]],
@@ -715,11 +969,12 @@ def test_unified_end_to_end_elbow(tmp_path):
                 "optimizer_max_iter": 2000,
             },
             "identification": {
+                "source": "excitation",
                 "solver": "ols",
                 "feasibility_method": "cholesky",
-                "data_file": None,
             },
-            "validation_pybullet": {
+            "validation": {
+                "source": "pybullet",
                 "comparison": {
                     "tolerance_abs": 0.01,
                     "tolerance_normalized_rms": 0.2,

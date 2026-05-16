@@ -431,12 +431,12 @@ class TestRunnerThreading:
             "stages": {
                 "excitation": True,
                 "identification": True,
-                "validation_pybullet": False,
+                "validation": False,
                 "report": False,
                 "benchmark": False,
                 "plot": False,
             },
-            "resume": {"from_checkpoint": None},
+            "checkpoint": None,
             "joint_limits": {
                 "position": [[-3.14159, 3.14159], [-1.5708, 1.5708], [-1.5708, 1.5708]],
                 "velocity": [[-3.0, 3.0], [-3.0, 3.0], [-3.0, 3.0]],
@@ -450,9 +450,9 @@ class TestRunnerThreading:
                 "optimizer_max_iter": 50,
             },
             "identification": {
+                "source": "excitation",
                 "solver": "ols",
                 "feasibility_method": "cholesky",
-                "data_file": None,
             },
             "export": {
                 "enabled": True,

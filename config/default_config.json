@@ -1,21 +1,35 @@
 {
     "urdf_path": "",
     "output_dir": "output",
+    "method": "newton_euler",
 
     "stages": {
         "excitation": true,
         "identification": true,
-        "validation_pybullet": false,
+        "validation": false,
+        "plot": false,
         "report": false,
-        "benchmark": false,
-        "plot": false
+        "benchmark": false
     },
+    "checkpoint": null,
 
-    "resume": {
-        "from_checkpoint": null
+    "identification": {
+        "source": "excitation",
+        "solver": "ols",
+        "parameter_bounds": false,
+        "feasibility_method": "none"
     },
-
-    "method": "newton_euler",
+    "validation": {
+        "source": "pybullet",
+        "sample_rate_hz": 0,
+        "gravity": [0.0, 0.0, -9.80665],
+        "use_fixed_base": true,
+        "joint_name_order": null,
+        "comparison": {
+            "tolerance_abs": 0.001,
+            "tolerance_normalized_rms": 0.001
+        }
+    },
 
     "joint_limits": {
         "position": null,
@@ -23,7 +37,6 @@
         "acceleration": null,
         "torque": null
     },
-
     "excitation": {
         "basis_functions": "both",
         "optimize_phase": false,
@@ -53,22 +66,8 @@
             "convergence_tol": 0.01
         }
     },
-
     "friction": {
         "model": "none"
-    },
-
-    "identification": {
-        "solver": "ols",
-        "parameter_bounds": false,
-        "feasibility_method": "none",
-        "data_file": null,
-        "observation_matrix_cache": {
-            "save": false,
-            "filename": "observation_matrix_cache.npz",
-            "load_from": null,
-            "force_load": false
-        }
     },
 
     "filtering": {
@@ -76,33 +75,27 @@
         "cutoff_frequency_hz": 10.0,
         "filter_order": 4
     },
-
     "downsampling": {
         "frequency_hz": 0
-    },
-
-    "validation_pybullet": {
-        "sample_rate_hz": 0,
-        "gravity": [0.0, 0.0, -9.80665],
-        "use_fixed_base": true,
-        "joint_name_order": null,
-        "comparison": {
-            "tolerance_abs": 0.001,
-            "tolerance_normalized_rms": 0.001
-        }
     },
 
     "plot": {
         "format": "png",
         "dpi": 150
     },
-
-    "report": {},
-    "benchmark": {},
     "export": {
         "enabled": false,
         "urdf_filename": "adapted_robot.urdf",
         "friction_sidecar": true,
         "friction_sidecar_filename": "adapted_friction.json"
+    },
+
+    "advanced": {
+        "observation_matrix_cache": {
+            "save": false,
+            "filename": "observation_matrix_cache.npz",
+            "load_from": null,
+            "force_load": false
+        }
     }
 }

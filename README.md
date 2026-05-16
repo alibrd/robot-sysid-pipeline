@@ -28,7 +28,7 @@ python sysid.py config/my_robot.json --only excitation
 python sysid.py config/my_robot.json --resume tmp_output/elbow_3dof
 
 # Validate an existing excitation artifact from a previous unified output.
-python sysid.py config/my_robot.json --only validation_pybullet --resume tmp_output/elbow_3dof
+python sysid.py config/my_robot.json --only validation --resume tmp_output/elbow_3dof
 
 # Print the merged config without running anything.
 python sysid.py config/my_robot.json --dry-run
@@ -42,24 +42,43 @@ The unified config has a `stages` block with six boolean flags:
 |---|---|
 | `excitation` | Run pipeline Stages 1-6 and save the excitation trajectory; excitation-only runs also save a checkpoint |
 | `identification` | Run pipeline Stages 7-11 (observation matrix, base parameters, solver, feasibility, results) |
-| `validation_pybullet` | Replay the excitation in PyBullet `DIRECT` mode and compare torques against the Newton-Euler regressor |
+| `validation` | Compare the identified model against either PyBullet inverse dynamics or real measurements (selected via `validation.source`) |
 | `report` | Export a Markdown summary, CSV table, and per-joint plots from a validation run |
 | `benchmark` | Aggregate every validation run under `<output_dir>/validation` into a benchmark CSV/Markdown table |
 | `plot` | Render `excitation_trajectory.png` from `<output_dir>/pipeline/excitation_trajectory.npz` |
 
+## Mode 1 vs Mode 2 (data sources)
+
+Mode is read off the config in one line:
+
+- **Mode 1** &nbsp;⇔&nbsp; `identification.source == "excitation"` — URDF-only verification: design a Fourier excitation trajectory, synthesize torques from the nominal regressor, identify, and compare against PyBullet inverse-dynamics replay.
+- **Mode 2** &nbsp;⇔&nbsp; `identification.source` is a **path** to a pipeline-compatible measurements `.npz` — adapt the nominal model to real measurements. Validation source can be PyBullet (on the measurement trajectory — _currently unsupported_), or a second measurement file (held-out or external dataset).
+
+The validation backend is orthogonal and selected by `validation.source`:
+
+| `identification.source` | `validation.source` | Behaviour |
+|---|---|---|
+| `"excitation"` | `"pybullet"` | **Mode 1** — URDF-only nominal verification |
+| `"excitation"` | `<path>` | Synthetic identification, real-measurement validation |
+| `<path>` | `<path>` | **Mode 2** — real-data identification, real-data validation |
+| `<path>` | `"pybullet"` | Currently rejected with a clear error (PyBullet replay of a measurement trajectory is not yet implemented) |
+
+A path may point at either a `.npz` file directly or a directory containing `measurements.npz`. The `.npz` must hold the keys `q`, `dq`, `ddq`, `tau` (shape `(N, nDoF)`) and an optional `fs` scalar. Filtering, finite-differencing, trimming, and downsampling of raw measurements are **the user's responsibility** and happen outside the pipeline; the pipeline assumes the measurement file is already in this canonical form.
+
 Common invocations map directly onto these flags:
 
-- **Full pipeline** - `stages.excitation=true` and `stages.identification=true`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
+- **Full Mode-1 pipeline** - `stages.excitation=true` and `stages.identification=true` with `identification.source="excitation"`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
 - **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves `checkpoint.npz` and `checkpoint_config.json` under `<output_dir>/pipeline/`.
-- **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11. Setting `resume.from_checkpoint` together with `stages.excitation=true` is an error; the two modes are mutually exclusive.
-- **Validate an existing excitation** - `stages.validation_pybullet=true`, `stages.excitation=false`, and `resume.from_checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
+- **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and top-level `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11. Setting `checkpoint` together with `stages.excitation=true` is an error; the two modes are mutually exclusive.
+- **Validate an existing excitation** - `stages.validation=true`, `stages.excitation=false`, `validation.source="pybullet"`, and `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
+- **Mode 2 identification + measurement validation** - `stages.identification=true` and `stages.validation=true`, with both `identification.source` and `validation.source` pointing at measurement files. The excitation stage is automatically disabled.
 - **Plot results** - `stages.plot=true`. Reads `<output_dir>/pipeline/excitation_trajectory.npz` and writes `<output_dir>/plots/excitation_trajectory.png`. Combine with any stage that produces or already has that pipeline artifact.
-- **Compare with PyBullet after a fresh run** - `stages.validation_pybullet=true` with `stages.excitation=true`. The validation stage consumes the excitation artifact produced in the same invocation.
 
 The unified runner translates these stage choices into the underlying pipeline's
 excitation-only and checkpoint-resume controls. Identification without
-excitation requires `resume.from_checkpoint`, so an identification-only stage
-cannot accidentally run a fresh full pipeline.
+excitation requires either a measurement source (`identification.source=<path>`)
+or a saved excitation checkpoint, so an identification-only stage cannot
+accidentally run a fresh full pipeline.
 
 ## Output layout
 
@@ -93,9 +112,19 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 |---|---|---|
 | `urdf_path` | file path | Path to the robot URDF or xacro file |
 | `output_dir` | directory | Root for all stage outputs; subdirectories `pipeline/`, `validation/`, and `plots/` are created automatically |
-| `stages.*` | booleans | Stage selection (see above) |
-| `resume.from_checkpoint` | path or `null` | Reuse the pipeline artifact directory from a previous unified output (JSON: resolved relative to config file; `--resume` CLI flag: resolved relative to working directory) |
 | `method` | `newton_euler` / `euler_lagrange` | Dynamics formulation |
+| `stages.*` | booleans | Stage selection (see above) |
+| `checkpoint` | path or `null` | Reuse the pipeline artifact directory from a previous unified output (JSON: resolved relative to config file; `--resume` CLI flag: resolved relative to working directory) |
+| `identification.source` | `"excitation"` or path | `"excitation"` synthesises data from the designed Fourier trajectory (Mode 1); a path points at a pipeline-compatible measurements `.npz` (Mode 2) |
+| `identification.solver` | `ols` / `wls` / `bounded_ls` | Parameter solver |
+| `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement over full 10-parameter rigid-body blocks |
+| `validation.source` | `"pybullet"` or path | `"pybullet"` runs PyBullet inverse-dynamics replay; a path runs `MeasurementValidationRunner` against the measurement file |
+| `validation.sample_rate_hz` | float | PyBullet replay sample rate (0 = auto) |
+| `validation.gravity` | `[gx, gy, gz]` | Gravity vector for PyBullet; must match the Newton-Euler gravity constant |
+| `validation.use_fixed_base` | `true` / `false` | Fix the base when loading the URDF in PyBullet |
+| `validation.joint_name_order` | list or `null` | Optional joint-order override |
+| `validation.comparison.tolerance_abs` | float | Absolute torque tolerance |
+| `validation.comparison.tolerance_normalized_rms` | float | Normalised RMS tolerance |
 | `excitation.basis_functions` | `cosine` / `sine` / `both` | Fourier basis |
 | `excitation.optimize_phase` | `true` / `false` | Phase optimisation (only used with `both`) |
 | `excitation.optimize_condition_number` | `true` / `false` | Minimize `cond(Y^T Y)` |
@@ -105,25 +134,16 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `excitation.torque_validation_oversample_factor` | integer >= 1 | Dense replay factor for torque validation and oversampled constraint checks |
 | `excitation.torque_constraint.*` | object | Method-specific torque settings (uncertainty, envelope, penalty, guard-band, redesign) |
 | `friction.model` | `none` / `viscous` / `coulomb` / `viscous_coulomb` | Friction model |
-| `identification.solver` | `ols` / `wls` / `bounded_ls` | Parameter solver |
-| `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement over full 10-parameter rigid-body blocks |
-| `identification.data_file` | file path or `null` | External measurement data (`.npz`) |
-| `identification.observation_matrix_cache.save` | `true` / `false` | Write a reusable Stage 8/9 observation-matrix cache |
-| `identification.observation_matrix_cache.filename` | filename | Cache artifact name, default `observation_matrix_cache.npz` |
-| `identification.observation_matrix_cache.load_from` | path or `null` | Load a cache from a previous pipeline output directory or cache file |
-| `identification.observation_matrix_cache.force_load` | `true` / `false` | Permit cache reuse despite metadata mismatches while recording them in the summary |
 | `filtering.enabled` | `true` / `false` | Zero-phase Butterworth signal filtering |
 | `downsampling.frequency_hz` | float | Downsample frequency (0 = disabled) |
 | `joint_limits.position` | `[[lo,hi], ...]` or `null` | Joint position limits |
 | `joint_limits.velocity` | `[[lo,hi], ...]` or `null` | Joint velocity limits |
 | `joint_limits.acceleration` | `[[lo,hi], ...]` or `null` | Joint acceleration limits |
 | `joint_limits.torque` | `[[lo,hi], ...]` or `null` | Fallback torque limits when the URDF lacks joint effort limits |
-| `validation_pybullet.sample_rate_hz` | float | PyBullet replay sample rate (0 = auto) |
-| `validation_pybullet.gravity` | `[gx, gy, gz]` | Gravity vector for PyBullet; must match the Newton-Euler gravity constant |
-| `validation_pybullet.use_fixed_base` | `true` / `false` | Fix the base when loading the URDF in PyBullet |
-| `validation_pybullet.joint_name_order` | list or `null` | Optional joint-order override |
-| `validation_pybullet.comparison.tolerance_abs` | float | Absolute torque tolerance |
-| `validation_pybullet.comparison.tolerance_normalized_rms` | float | Normalised RMS tolerance |
+| `advanced.observation_matrix_cache.save` | `true` / `false` | Write a reusable Stage 8/9 observation-matrix cache |
+| `advanced.observation_matrix_cache.filename` | filename | Cache artifact name, default `observation_matrix_cache.npz` |
+| `advanced.observation_matrix_cache.load_from` | path or `null` | Load a cache from a previous pipeline output directory or cache file |
+| `advanced.observation_matrix_cache.force_load` | `true` / `false` | Permit cache reuse despite metadata mismatches while recording them in the summary |
 | `plot.format` | `png` / `pdf` / etc. | Output format |
 | `plot.dpi` | integer | Output resolution |
 | `export.enabled` | `true` / `false` | Opt-in adapted-URDF export sub-step of Stage 12 |
@@ -152,8 +172,8 @@ percentage.
 torque constraints to the SLSQP path. `soft_penalty` adds a smooth violation
 penalty to the objective instead, and `sequential_redesign` runs an outer loop
 that repeatedly redesigns with `nominal_hard`. `sequential_redesign` is further
-restricted to `method=newton_euler` and synthetic-data runs
-(`identification.data_file=null`).
+restricted to `method=newton_euler` and Mode 1 runs
+(`identification.source="excitation"`).
 
 ## Torque limit sourcing
 

@@ -46,8 +46,9 @@ def load_config_dict(user_cfg: dict,
     resolution.
     """
     defaults = load_default_config()
-    user_cfg = _normalize_pipeline_mode_fields(user_cfg)
+    user_cfg = _normalize_user_facing_keys(user_cfg)
     cfg = deep_merge(defaults, user_cfg)
+    cfg = _translate_unified_to_internal_keys(cfg)
     cfg = _strip_deprecated_excitation_keys(cfg)
     cfg = _resolve_paths(cfg, resolve_relative_to)
     if validate:
@@ -70,10 +71,11 @@ def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
     )
 
     identification = resolved.get("identification", {})
-    identification["data_file"] = resolve_path_value(
-        identification.get("data_file"),
-        base_dir,
-    )
+    if identification.get("data_file"):
+        identification["data_file"] = resolve_path_value(
+            identification.get("data_file"),
+            base_dir,
+        )
     cache_cfg = identification.get("observation_matrix_cache")
     if isinstance(cache_cfg, dict):
         cache_cfg = deepcopy(cache_cfg)
@@ -86,17 +88,58 @@ def _resolve_paths(cfg: dict, resolve_relative_to: str | Path | None) -> dict:
     return resolved
 
 
-def _normalize_pipeline_mode_fields(user_cfg: dict) -> dict:
+def _normalize_user_facing_keys(user_cfg: dict) -> dict:
     """Accept workflow-style nested pipeline mode fields in pipeline configs."""
     normalized = deepcopy(user_cfg)
     pipeline_section = normalized.get("pipeline")
-    if not isinstance(pipeline_section, dict):
-        return normalized
-
-    for key in ("excitation_only", "checkpoint_dir"):
-        if key not in normalized and key in pipeline_section:
-            normalized[key] = pipeline_section[key]
+    if isinstance(pipeline_section, dict):
+        for key in ("excitation_only", "checkpoint_dir"):
+            if key not in normalized and key in pipeline_section:
+                normalized[key] = pipeline_section[key]
     return normalized
+
+
+def _translate_unified_to_internal_keys(cfg: dict) -> dict:
+    """Translate user-facing unified-runner keys to internal pipeline keys.
+
+    The unified config schema uses:
+      - ``identification.source`` ("excitation" or a path to a measurements file)
+      - top-level ``checkpoint`` (path)
+      - ``advanced.observation_matrix_cache`` block
+
+    The internal ``SystemIdentificationPipeline`` consumes the legacy fields
+    ``identification.data_file``, top-level ``checkpoint_dir``, and
+    ``identification.observation_matrix_cache``. This helper performs the
+    one-way translation so the scientific core never has to learn the new
+    names. The translation is a no-op when the unified keys are absent
+    (i.e. the caller already supplied internal keys directly).
+    """
+    translated = deepcopy(cfg)
+
+    identification = translated.get("identification") or {}
+    source = identification.get("source")
+    if source is not None:
+        if source == "excitation":
+            identification.setdefault("data_file", None)
+        else:
+            identification.setdefault("data_file", source)
+        identification.pop("source", None)
+        translated["identification"] = identification
+
+    checkpoint = translated.get("checkpoint")
+    if checkpoint is not None and translated.get("checkpoint_dir") is None:
+        translated["checkpoint_dir"] = checkpoint
+    translated.pop("checkpoint", None)
+
+    advanced = translated.get("advanced") or {}
+    if isinstance(advanced, dict):
+        cache = advanced.get("observation_matrix_cache")
+        if isinstance(cache, dict):
+            identification.setdefault("observation_matrix_cache", deepcopy(cache))
+            translated["identification"] = identification
+        translated.pop("advanced", None)
+
+    return translated
 
 
 def _strip_deprecated_excitation_keys(cfg: dict) -> dict:

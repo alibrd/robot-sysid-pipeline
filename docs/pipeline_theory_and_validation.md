@@ -997,8 +997,6 @@ matching the smooth Coulomb-friction augmentation commonly used in inverse-dynam
 - Main orchestration: [`src/pipeline.py`](../src/pipeline.py)
 - Friction augmentation: [`src/friction.py`](../src/friction.py)
 
-If `identification.data_file` is absent, the pipeline synthesizes `q`, `dq`, `ddq` from the optimized excitation trajectory and computes torques from the chosen regressor. If `data_file` is present, the pipeline expects `q`, `dq`, `ddq`, `tau`, and optionally `fs` to already exist in the `.npz`.
-
 ### Verification evidence
 
 **What is verified**: The friction regressor blocks for all four models (`none`, `viscous`, `coulomb`, `viscous_coulomb`) match their analytical definitions.

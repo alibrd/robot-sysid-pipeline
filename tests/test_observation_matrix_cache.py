@@ -191,7 +191,9 @@ def test_cache_load_from_resolves_relative_paths(tmp_path):
         "urdf_path": str(URDF_RRBOT),
         "output_dir": "../out",
         "identification": {
-            "data_file": None,
+            "source": "excitation",
+        },
+        "advanced": {
             "observation_matrix_cache": {
                 "load_from": cache_ref,
             },
@@ -201,12 +203,15 @@ def test_cache_load_from_resolves_relative_paths(tmp_path):
     config_path.parent.mkdir(parents=True)
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    cfg = load_config(str(config_path))
     expected = str((config_dir / cache_ref).resolve())
+
+    # config_loader translates the unified-runner schema into the legacy
+    # internal `identification.observation_matrix_cache` slot.
+    cfg = load_config(str(config_path))
     assert cfg["identification"]["observation_matrix_cache"]["load_from"] == expected
 
     runner = UnifiedRunner(str(config_path))
     assert (
-        runner.cfg["identification"]["observation_matrix_cache"]["load_from"]
+        runner.cfg["advanced"]["observation_matrix_cache"]["load_from"]
         == expected
     )

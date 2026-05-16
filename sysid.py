@@ -20,7 +20,7 @@ def main() -> int:
         default=None,
         help=(
             "Run only this stage: excitation|identification|"
-            "validation_pybullet|report|benchmark|plot"
+            "validation|report|benchmark|plot"
         ),
     )
     parser.add_argument(
@@ -34,7 +34,7 @@ def main() -> int:
         type=str,
         default=None,
         help=(
-            "Resume from a previous output directory (overrides resume.from_checkpoint). "
+            "Resume from a previous output directory (overrides top-level 'checkpoint'). "
             "Relative paths are resolved against the current working directory, "
             "not the config file's location."
         ),
