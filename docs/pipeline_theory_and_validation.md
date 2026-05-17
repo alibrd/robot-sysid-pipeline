@@ -1410,18 +1410,26 @@ STAGE 12: LMI-constrained NE identification must return a feasible model
 ## Stage 12. Save Outputs, Write Logs, Optionally Export an Adapted URDF, and Interpret Success Correctly
 
 ### Output artifacts
-The pipeline writes:
-- `pipeline.log`
+The pipeline writes the following files under `<output_dir>/pipeline/`. Note that the regressor artifacts are emitted in **Stage 4** (so they appear in every pipeline-running mode, including excitation-only and Mode 2), while the remaining files are emitted by later stages:
+
+Stage 4 (always written when the pipeline runs):
 - `regressor_model.json`
 - `regressor_model.urdf`
 - `regressor_function.py`
-- `observation_matrix_cache.npz` when observation-matrix cache saving is enabled
+
+Stage 6:
 - `excitation_trajectory.npz`
 - `torque_limit_validation.npz` when torque-constrained replay is produced
+
+Stage 12:
 - `identification_results.npz`
 - `results_summary.json`
 - `<export.urdf_filename>` (default `adapted_robot.urdf`) when `export.enabled=true`
 - `<export.friction_sidecar_filename>` (default `adapted_friction.json`) when `export.enabled=true`, `friction.model != "none"`, and `export.friction_sidecar=true`
+
+Other:
+- `pipeline.log`
+- `observation_matrix_cache.npz` when observation-matrix cache saving is enabled
 
 These are orchestrated from [`src/pipeline.py`](../src/pipeline.py), with logging configured in [`src/pipeline_logger.py`](../src/pipeline_logger.py).
 

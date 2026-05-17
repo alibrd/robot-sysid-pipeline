@@ -40,7 +40,7 @@ The unified config has a `stages` block with six boolean flags:
 
 | Flag | What it does |
 |---|---|
-| `excitation` | Run pipeline Stages 1-6 and save the excitation trajectory; excitation-only runs also save a checkpoint |
+| `excitation` | Run pipeline Stages 1-6; emits the regressor artifacts (Stage 4) and excitation trajectory (Stage 6). Excitation-only runs additionally save a resume checkpoint. |
 | `identification` | Run pipeline Stages 7-11 (observation matrix, base parameters, solver, feasibility, results) |
 | `validation` | Compare the identified model against either PyBullet inverse dynamics or real measurements (selected via `validation.source`) |
 | `report` | Export a Markdown summary, CSV table, and per-joint plots from a validation run |
@@ -68,7 +68,7 @@ A path may point at either a `.npz` file directly or a directory containing `mea
 Common invocations map directly onto these flags:
 
 - **Full Mode-1 pipeline** - `stages.excitation=true` and `stages.identification=true` with `identification.source="excitation"`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
-- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves `checkpoint.npz` and `checkpoint_config.json` under `<output_dir>/pipeline/`.
+- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves the regressor artifacts (`regressor_model.json`, `regressor_model.urdf`, `regressor_function.py`), the excitation trajectory (`excitation_trajectory.npz`), and a resume checkpoint (`checkpoint.npz`, `checkpoint_config.json`) under `<output_dir>/pipeline/`.
 - **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and top-level `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11. Setting `checkpoint` together with `stages.excitation=true` is an error; the two modes are mutually exclusive.
 - **Validate an existing excitation** - `stages.validation=true`, `stages.excitation=false`, `validation.source="pybullet"`, and `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
 - **Mode 2 identification + measurement validation** - `stages.identification=true` and `stages.validation=true`, with both `identification.source` and `validation.source` pointing at measurement files. The excitation stage is automatically disabled.
