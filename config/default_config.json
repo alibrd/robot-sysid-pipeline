@@ -17,7 +17,12 @@
         "source": "excitation",
         "solver": "ols",
         "parameter_bounds": false,
-        "feasibility_method": "none"
+        "feasibility_method": "none",
+        "regularization": {
+            "lambda": 0.0,
+            "weighting": "identity",
+            "friction_weight_scale": 0.0
+        }
     },
     "validation": {
         "source": "pybullet",

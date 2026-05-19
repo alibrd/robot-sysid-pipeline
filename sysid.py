@@ -44,6 +44,15 @@ def main() -> int:
         action="store_true",
         help="Resolve and print the merged config; do not execute any stage",
     )
+    parser.add_argument(
+        "--reg-lambda",
+        type=float,
+        default=None,
+        help=(
+            "Override identification.regularization.lambda. Set to 0 to "
+            "disable the Tikhonov nominal-regulariser."
+        ),
+    )
     args = parser.parse_args()
 
     runner = UnifiedRunner(args.config)
@@ -53,6 +62,8 @@ def main() -> int:
         runner.disable_stage(stage)
     if args.resume:
         runner.set_resume(args.resume)
+    if args.reg_lambda is not None:
+        runner.set_regularization_lambda(args.reg_lambda)
 
     if args.dry_run:
         runner.print_resolved_config()

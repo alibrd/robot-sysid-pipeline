@@ -39,6 +39,7 @@ where $\tau$ is the joint-torque vector, $Y$ is the regressor, and $\pi$ is the 
 | Constrained identification with pseudo-inertia PSD (LMI) | Supported |
 | Cholesky-factored feasibility reparameterization | Supported |
 | Torque-limited excitation (`nominal_hard`, `soft_penalty`, `robust_box`, `chance`, `actuator_envelope`, `sequential_redesign`) | Supported |
+| Tikhonov nominal-regulariser for identification (`identity`, `per_block`) | Supported |
 | Unified single-config runner for pipeline, validation, report, benchmark, and plot stages | Supported |
 | Cartesian / workspace excitation constraints | **Not implemented** |
 | Automatic differentiation from raw $q$ to $\dot q,\ddot q$ | **Not implemented**; external data must provide `dq` and `ddq` |
@@ -1226,6 +1227,21 @@ $$
 
 Bounded least squares solves the same quadratic objective subject to lower and upper parameter bounds.
 
+**Optional Tikhonov nominal regulariser**
+
+When `identification.regularization.lambda > 0`, all solver paths minimise the augmented objective
+
+$$
+\hat \pi = \arg\min_{\pi}\|W\pi-\tau\|_2^2 + \lambda\|\pi - \pi_0\|_R^2,
+$$
+
+where $\pi_0$ is the nominal parameter vector assembled from the URDF inertials and $R$ is a diagonal positive-semidefinite weight matrix controlled by `identification.regularization.weighting`:
+
+- `identity`: $R = I$ — uniform absolute pull toward the nominal vector.
+- `per_block`: $R_{ii} = 1/|\pi_{0,i}|$ for rigid-body parameters and $R_{ii} = $ `friction_weight_scale` for friction columns — proportional pull per element, with friction columns unregularised by default (`friction_weight_scale = 0`).
+
+For the unconstrained paths (`ols`, `wls`, `bounded_ls`) the term is implemented as stacked row augmentation; solving the extended system is algebraically equivalent to minimising the Tikhonov objective. For the LMI and Cholesky paths the term enters as an explicit cost and gradient contribution. Reported residuals are the data-fidelity norm $\|W\hat{\pi} - \tau\|_2$ on all paths, so they remain comparable across regularised and unregularised runs.
+
 ### Code path
 - Solvers: [`src/solver.py`](../src/solver.py)
 - Pipeline integration and automatic bounds selection: [`src/pipeline.py`](../src/pipeline.py)
@@ -1235,6 +1251,7 @@ Current solver behavior:
 - `wls`: one IRLS-style weighting step from OLS residuals
 - `bounded_ls`: `scipy.optimize.lsq_linear`
 - `parameter_bounds=true`: auto-generates $\pm 50\%$ style bounds around the current base-parameter magnitudes and switches `ols` to `bounded_ls`
+- Tikhonov regulariser: `_augment_with_regulariser()` and `_resolve_R_weight()` in [`src/solver.py`](../src/solver.py) handle stacked augmentation for the unconstrained paths; `_reg_term` / `_reg_grad` closures handle the LMI and Cholesky paths
 
 ### Verification evidence
 
@@ -1269,6 +1286,8 @@ STAGE 10: OLS must recover exact base parameters from noiseless data
 
 ### Current implementation note
 When `feasibility_method="lmi"` is requested, the pipeline does **not** stay in the reduced base-parameter space. It lifts the problem back to a full-space constrained least-squares problem to apply per-link pseudo-inertia constraints. That is a deliberate implementation choice in the current code.
+
+Residuals are reported as the data-fidelity norm $\|W\hat{\pi} - \tau\|_2$ for all three unconstrained solver paths, so they are directly comparable across solver choices regardless of whether the regulariser is active.
 
 ## Stage 11. Check or Enforce Physical Feasibility
 
@@ -1685,6 +1704,7 @@ tests/test_urdf_export.py::test_pybullet_round_trip_consistency PASSED   # --run
 | 9 | Base reduction preserves the observation equation | [`src/base_parameters.py`](../src/base_parameters.py) | `test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_and_el`, `test_slow_base_parameter_reduction_preserves_multiple_random_default_observation_matrices` |
 | 10 | Parameter bounds switch the pipeline into bounded LS | [`src/pipeline.py`](../src/pipeline.py), [`src/solver.py`](../src/solver.py) | `test_stage_10_parameter_bounds_enable_bounded_ls` |
 | 10 | OLS recovers exact base parameters from noiseless data | [`src/solver.py`](../src/solver.py) | `test_stage_10_ols_recovers_exact_base_parameters_from_noiseless_data` |
+| 10 | Tikhonov regulariser pulls identified parameters toward the nominal vector on all solver paths | [`src/solver.py`](../src/solver.py), [`src/pipeline.py`](../src/pipeline.py) | — |
 | 11 | Pseudo-inertia detects physically invalid bodies | [`src/feasibility.py`](../src/feasibility.py) | `test_stage_11_pseudo_inertia_checks_report_standard_rigid_body_failures` |
 | 11 | Regressor models expose full rigid and friction-augmented parameter contracts | [`src/regressor_model.py`](../src/regressor_model.py) | `tests/test_regressor_model.py` |
 | 11 | EL constrained feasibility modes are accepted through the full-column wrapper | [`src/config_loader.py`](../src/config_loader.py), [`src/regressor_model.py`](../src/regressor_model.py) | `test_stage_11_euler_lagrange_accepts_constrained_feasibility_modes` |

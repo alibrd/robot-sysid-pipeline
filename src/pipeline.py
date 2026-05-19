@@ -967,10 +967,65 @@ class SystemIdentificationPipeline:
                 solver = "bounded_ls"
                 log.info("Switching to bounded_ls due to parameter_bounds=true")
 
+        # Nominal-regulariser (paper Eq. 7 / Eq. 17) plumbing.
+        # `pi_full` is the augmented nominal vector [pi_urdf, theta_f=0],
+        # already built at the top of this method.
+        reg_cfg = cfg["identification"].get("regularization", {}) or {}
+        lambda_reg = float(reg_cfg.get("lambda", 0.0) or 0.0)
+        weighting = str(reg_cfg.get("weighting", "identity"))
+        friction_weight_scale = float(
+            reg_cfg.get("friction_weight_scale", 0.0) or 0.0
+        )
+        beta_0_full = np.asarray(pi_full, dtype=float).reshape(-1)
+        n_full = beta_0_full.size
+        n_rigid = 10 * kin.nDoF
+        if lambda_reg > 0.0:
+            if weighting == "identity":
+                R_full_diag = np.ones(n_full)
+            elif weighting == "per_block":
+                # Rigid-body block: scale by 1/|pi_urdf,i| so each parameter
+                # is pulled in *relative* magnitude. Friction block: scale
+                # by friction_weight_scale (default 0 → unregularised).
+                eps = 1e-6
+                R_full_diag = np.zeros(n_full)
+                R_full_diag[:n_rigid] = 1.0 / np.maximum(
+                    np.abs(beta_0_full[:n_rigid]), eps
+                )
+                if n_full > n_rigid:
+                    R_full_diag[n_rigid:] = friction_weight_scale
+            else:
+                raise ValueError(
+                    f"Unknown regularization.weighting='{weighting}'. "
+                    "Supported: 'identity', 'per_block'."
+                )
+            log.info(
+                "Regularization: lambda=%.6g, weighting=%s, "
+                "||beta_0||=%.4g, friction_scale=%.6g",
+                lambda_reg, weighting,
+                float(np.linalg.norm(beta_0_full)), friction_weight_scale,
+            )
+        else:
+            R_full_diag = None
+
+        # Project beta_0 / R into the base-parameter space for the
+        # unconstrained solver branches; the constrained paths see the
+        # full vector unchanged.
+        if lambda_reg > 0.0 and feas_method == "none":
+            beta_0_base = P_mat @ beta_0_full
+            R_base = P_mat @ np.diag(R_full_diag) @ P_mat.T
+            solver_beta_0 = beta_0_base
+            solver_R = R_base
+        else:
+            solver_beta_0 = beta_0_full
+            solver_R = R_full_diag
+
         pi_hat, residual, info = solve_identification(
             W_base, tau_vec, solver=solver, bounds=bounds_opt,
             nDoF=kin.nDoF, feasibility_method=feas_method,
             P_mat=P_mat if feas_method != "none" else None,
+            lambda_reg=lambda_reg,
+            beta_0=solver_beta_0 if lambda_reg > 0.0 else None,
+            R_weight=solver_R if lambda_reg > 0.0 else None,
         )
         log.info("Identified %d parameters, residual=%.6e",
                  len(pi_hat), residual)

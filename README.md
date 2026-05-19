@@ -32,6 +32,9 @@ python sysid.py config/my_robot.json --only validation --resume tmp_output/elbow
 
 # Print the merged config without running anything.
 python sysid.py config/my_robot.json --dry-run
+
+# Override the Tikhonov regulariser strength without editing the config.
+python sysid.py config/my_robot.json --reg-lambda 1e-3
 ```
 
 ## Stages
@@ -118,6 +121,9 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `identification.source` | `"excitation"` or path | `"excitation"` synthesises data from the designed Fourier trajectory (Mode 1); a path points at a pipeline-compatible measurements `.npz` (Mode 2) |
 | `identification.solver` | `ols` / `wls` / `bounded_ls` | Parameter solver |
 | `identification.feasibility_method` | `none` / `lmi` / `cholesky` | Physical feasibility enforcement over full 10-parameter rigid-body blocks |
+| `identification.regularization.lambda` | float | Tikhonov regulariser strength; 0 disables (default) |
+| `identification.regularization.weighting` | `identity` / `per_block` | Weight matrix R; `identity` = uniform pull toward nominal; `per_block` = element-wise scale by 1/\|π₀,i\| for rigid blocks |
+| `identification.regularization.friction_weight_scale` | float | Scale applied to friction columns in `per_block` mode; 0 = unregularised (default) |
 | `validation.source` | `"pybullet"` or path | `"pybullet"` runs PyBullet inverse-dynamics replay; a path runs `MeasurementValidationRunner` against the measurement file |
 | `validation.sample_rate_hz` | float | PyBullet replay sample rate (0 = auto) |
 | `validation.gravity` | `[gx, gy, gz]` | Gravity vector for PyBullet; must match the Newton-Euler gravity constant |
@@ -213,7 +219,9 @@ torque limits with this precedence:
     link's pseudo-inertia is reparameterised as $J = LL^\top$ (lower-triangular
     `L`), guaranteeing PSD by construction, and optimised with L-BFGS-B
     (Traversaro et al. 2016). The pipeline exposes full per-link 10-parameter
-    rigid-body blocks to these constrained solvers
+    rigid-body blocks to these constrained solvers. An optional Tikhonov
+    nominal-regulariser (`identification.regularization.lambda > 0`) augments
+    the objective of all solver paths
 11. **Feasibility check** -- pseudo-inertia PSD per link (the
     necessary-and-sufficient condition for physical consistency). This subsumes
     positive mass, inertia PSD, and triangle-inequality checks, which are still

@@ -154,6 +154,12 @@ class UnifiedRunner:
             path = Path.cwd() / path
         self.cfg["checkpoint"] = str(path.resolve())
 
+    def set_regularization_lambda(self, lambda_reg: float) -> None:
+        """Override identification.regularization.lambda from the CLI."""
+        ident = self.cfg.setdefault("identification", {})
+        reg = ident.setdefault("regularization", {})
+        reg["lambda"] = float(lambda_reg)
+
     def print_resolved_config(self) -> None:
         """Print the merged + resolved config (for --dry-run)."""
         cfg_to_print = deepcopy(self.cfg)

@@ -1,6 +1,17 @@
 """Parameter identification solvers: OLS, WLS, bounded least-squares,
 and physically-constrained least-squares.
 
+All solvers optionally accept a Tikhonov "nominal-regulariser" term
+(paper Eq. 7 / Eq. 17), implementing
+
+    argmin_β  ‖Wβ − τ‖²  +  λ ‖β − β₀‖²_R
+
+with R positive semi-definite (scalar, diagonal vector, or full matrix).
+When `lambda_reg <= 0` the regulariser is inactive and the solver behaves
+exactly as the unregularised path. The regulariser is added to the OLS /
+WLS / bounded_ls branches by stacked augmentation, and to the LMI-SLSQP /
+Cholesky-LBFGSB branches by an explicit cost / gradient term.
+
 The constrained path ("lmi") enforces pseudo-inertia PSD per link, which
 is the correct necessary-and-sufficient condition for physical consistency
 (see Wensing, Kim & Slotine 2018).  The solver wraps the LS problem inside
@@ -23,6 +34,67 @@ from .feasibility import pseudo_inertia_matrix, pi_from_pseudo_inertia_matrix
 logger = logging.getLogger("sysid_pipeline")
 
 
+def _resolve_R_weight(R_weight, p: int) -> np.ndarray:
+    """Return a (p,) diagonal vector representation of R.
+
+    Accepts None (identity), scalar, (p,) vector, or (p,p) matrix.
+    For the (p,p) case we keep the full matrix (returned as-is); callers
+    handle both diagonal and dense forms.
+    """
+    if R_weight is None:
+        return np.ones(p)
+    arr = np.asarray(R_weight, dtype=float)
+    if arr.ndim == 0:
+        return np.full(p, float(arr))
+    if arr.ndim == 1:
+        if arr.size != p:
+            raise ValueError(
+                f"R_weight vector size {arr.size} != parameter count {p}"
+            )
+        return arr
+    if arr.ndim == 2:
+        if arr.shape != (p, p):
+            raise ValueError(
+                f"R_weight matrix shape {arr.shape} != ({p},{p})"
+            )
+        return arr
+    raise ValueError(f"R_weight has unsupported ndim={arr.ndim}")
+
+
+def _augment_with_regulariser(W, tau_vec, lambda_reg, beta_0, R_weight):
+    """Return (W_aug, tau_aug) implementing the Tikhonov term as stacked rows.
+
+    Solving lstsq on the augmented system yields the exact minimiser of
+    ‖Wβ − τ‖² + λ ‖β − β₀‖²_R when R is diagonal (or scalar / identity).
+    For full-matrix R we use the Cholesky factor L of R so that the new
+    rows are L^T(β − β₀), preserving the same equivalence.
+    """
+    if lambda_reg is None or lambda_reg <= 0.0:
+        return W, tau_vec
+    m, p = W.shape
+    if beta_0 is None:
+        beta_0 = np.zeros(p)
+    beta_0 = np.asarray(beta_0, dtype=float).reshape(-1)
+    if beta_0.size != p:
+        raise ValueError(
+            f"beta_0 size {beta_0.size} != parameter count {p}"
+        )
+    R = _resolve_R_weight(R_weight, p)
+    sqrt_lam = float(np.sqrt(lambda_reg))
+    if R.ndim == 1:
+        sqrt_R = np.sqrt(np.maximum(R, 0.0))
+        scale = sqrt_lam * sqrt_R
+        W_pen = np.diag(scale)
+        tau_pen = scale * beta_0
+    else:
+        L = np.linalg.cholesky(R + 1e-18 * np.eye(p))
+        W_pen = sqrt_lam * L.T
+        tau_pen = sqrt_lam * (L.T @ beta_0)
+    W_aug = np.vstack([W, W_pen])
+    tau_aug = np.concatenate([tau_vec, tau_pen])
+    return W_aug, tau_aug
+
+
 def solve_identification(W: np.ndarray,
                          tau_vec: np.ndarray,
                          solver: str = "ols",
@@ -30,7 +102,10 @@ def solve_identification(W: np.ndarray,
                          weights: np.ndarray = None,
                          nDoF: int = 0,
                          feasibility_method: str = "none",
-                         P_mat: np.ndarray = None):
+                         P_mat: np.ndarray = None,
+                         lambda_reg: float = 0.0,
+                         beta_0: np.ndarray = None,
+                         R_weight: np.ndarray = None):
     """Solve the linear identification problem  tau = W pi.
 
     Parameters
@@ -51,17 +126,36 @@ def solve_identification(W: np.ndarray,
     P_mat : (r, p_full) regrouping matrix, required when feasibility_method
         is not "none". Relates W_base @ pi_base = W_full @ pi_full via
         pi_base = P @ pi_full.  The optimisation is then over pi_full.
+    lambda_reg : float, default 0.0
+        Tikhonov nominal-regulariser strength (paper Eq. 7 / Eq. 17). When
+        > 0 the solver minimises ‖Wβ − τ‖² + λ‖β − β₀‖²_R. When 0 the
+        regulariser is inactive and the result equals the unregularised LS.
+    beta_0 : (p_eff,) array, optional
+        Nominal parameter centre. For the unconstrained paths (`ols`,
+        `wls`, `bounded_ls`) it must match the base-parameter space, i.e.
+        the user provides `beta_0_base = P @ beta_0_full`. For the LMI /
+        Cholesky paths beta_0 is in the FULL parameter space.
+    R_weight : scalar / (p,) / (p,p), optional
+        Positive semi-definite parameter weighting. None ↦ identity.
 
     Returns
     -------
     pi_hat : (p,) estimated parameters (base params when unconstrained,
              full params when constrained)
-    residual : scalar residual norm
+    residual : scalar residual norm (data-fidelity only — regulariser term
+               not included so the number stays comparable to the
+               unregularised path)
     info : dict with solver-specific information
     """
     m, p = W.shape
     logger.info("Solver: %s, matrix %dx%d, overdetermination %.1f:1",
                 solver, m, p, m / max(p, 1))
+    if lambda_reg and lambda_reg > 0.0:
+        logger.info("Regulariser active: lambda=%.6g, R=%s, ||beta_0||=%s",
+                    lambda_reg,
+                    "None" if R_weight is None else
+                    f"shape={np.asarray(R_weight).shape}",
+                    "None" if beta_0 is None else f"{np.linalg.norm(beta_0):.4g}")
 
     # --- Constrained identification (LMI) ----------------------------------
     if feasibility_method == "lmi" and nDoF > 0:
@@ -70,7 +164,9 @@ def solve_identification(W: np.ndarray,
                            "matrix P provided. Falling back to unconstrained solver.")
         else:
             return _solve_constrained(W, tau_vec, nDoF, feasibility_method,
-                                      solver, weights, P_mat)
+                                      solver, weights, P_mat,
+                                      lambda_reg=lambda_reg,
+                                      beta_0=beta_0, R_weight=R_weight)
 
     # --- Cholesky reparameterisation ----------------------------------------
     if feasibility_method == "cholesky" and nDoF > 0:
@@ -78,12 +174,20 @@ def solve_identification(W: np.ndarray,
             logger.warning("Cholesky identification requested but no regrouping "
                            "matrix P provided. Falling back to unconstrained solver.")
         else:
-            return _solve_cholesky(W, tau_vec, nDoF, solver, weights, P_mat)
+            return _solve_cholesky(W, tau_vec, nDoF, solver, weights, P_mat,
+                                   lambda_reg=lambda_reg,
+                                   beta_0=beta_0, R_weight=R_weight)
 
     # --- Standard solvers --------------------------------------------------
+    # For OLS / WLS / bounded_ls the regulariser is added by stacked
+    # augmentation: solving lstsq on [W; sqrt(λR)] against [τ; sqrt(λR)·β₀]
+    # is algebraically identical to minimising the Tikhonov objective.
     if solver == "ols":
-        pi_hat, residuals, rank, sv = np.linalg.lstsq(W, tau_vec, rcond=None)
-        res_norm = np.linalg.norm(W @ pi_hat - tau_vec)
+        W_aug, tau_aug = _augment_with_regulariser(
+            W, tau_vec, lambda_reg, beta_0, R_weight
+        )
+        pi_hat, residuals, rank, sv = np.linalg.lstsq(W_aug, tau_aug, rcond=None)
+        res_norm = np.linalg.norm(W @ pi_hat - tau_vec)  # data-fidelity only
         logger.info("OLS: rank=%d, residual=%.6e", rank, res_norm)
         return pi_hat, res_norm, {"rank": rank, "singular_values": sv}
 
@@ -98,7 +202,12 @@ def solve_identification(W: np.ndarray,
         sqrt_w = np.sqrt(weights)
         W_w = W * sqrt_w[:, None]
         tau_w = tau_vec * sqrt_w
-        pi_hat, residuals, rank, sv = np.linalg.lstsq(W_w, tau_w, rcond=None)
+        # WLS scales rows of W and tau; regulariser block is unweighted
+        # and stacked on top of the weighted system.
+        W_aug, tau_aug = _augment_with_regulariser(
+            W_w, tau_w, lambda_reg, beta_0, R_weight
+        )
+        pi_hat, residuals, rank, sv = np.linalg.lstsq(W_aug, tau_aug, rcond=None)
         res_norm = np.linalg.norm(W @ pi_hat - tau_vec)
         logger.info("WLS: rank=%d, residual=%.6e", rank, res_norm)
         return pi_hat, res_norm, {"rank": rank, "singular_values": sv}
@@ -109,10 +218,13 @@ def solve_identification(W: np.ndarray,
             ub = np.inf * np.ones(p)
         else:
             lb, ub = bounds
-        result = lsq_linear(W, tau_vec, bounds=(lb, ub), method="bvls",
+        W_aug, tau_aug = _augment_with_regulariser(
+            W, tau_vec, lambda_reg, beta_0, R_weight
+        )
+        result = lsq_linear(W_aug, tau_aug, bounds=(lb, ub), method="bvls",
                              verbose=0)
         pi_hat = result.x
-        res_norm = result.cost
+        res_norm = float(np.linalg.norm(W @ pi_hat - tau_vec))
         logger.info("Bounded LS: residual=%.6e, status=%d", res_norm, result.status)
         return pi_hat, res_norm, {"status": result.status, "message": result.message}
 
@@ -121,17 +233,41 @@ def solve_identification(W: np.ndarray,
 
 
 def _solve_constrained(W_base, tau_vec, nDoF, feasibility_method, base_solver,
-                       weights, P_mat):
+                       weights, P_mat,
+                       lambda_reg: float = 0.0,
+                       beta_0: np.ndarray = None,
+                       R_weight: np.ndarray = None):
     """Solve LS in the FULL parameter space with pseudo-inertia PSD constraints.
 
     The observation equation is  tau = W_base @ pi_base = W_base @ P @ pi_full.
     We optimise over pi_full (10*nDoF) with the constraint that each link's
-    4×4 pseudo-inertia matrix J_i is positive semidefinite.
+    4×4 pseudo-inertia matrix J_i is positive semidefinite. The optional
+    Tikhonov term λ‖π_full − β₀‖²_R is added to cost and gradient.
     """
     p_full = P_mat.shape[1]
     W_full = W_base @ P_mat  # (m, p_full)
 
     eps_eig = 1e-8
+
+    # Resolve regulariser parameters in the FULL parameter space.
+    reg_active = bool(lambda_reg and lambda_reg > 0.0)
+    if reg_active:
+        if beta_0 is None:
+            beta_0_full = np.zeros(p_full)
+        else:
+            beta_0_full = np.asarray(beta_0, dtype=float).reshape(-1)
+            if beta_0_full.size != p_full:
+                raise ValueError(
+                    f"beta_0 size {beta_0_full.size} != full param count {p_full}"
+                )
+        R_full = _resolve_R_weight(R_weight, p_full)
+        # For fast quadratic forms, precompute λ·R either as a (p,) diag
+        # or as the full (p,p) matrix.
+        lam = float(lambda_reg)
+    else:
+        beta_0_full = None
+        R_full = None
+        lam = 0.0
 
     # OLS on full-space as initial guess
     pi0, _, _, _ = np.linalg.lstsq(W_full, tau_vec, rcond=None)
@@ -147,12 +283,28 @@ def _solve_constrained(W_base, tau_vec, nDoF, feasibility_method, base_solver,
         WtW = W_full.T @ W_full
         Wt_tau = W_full.T @ tau_vec
 
+    def _reg_term(pi):
+        if not reg_active:
+            return 0.0
+        diff = pi - beta_0_full
+        if R_full.ndim == 1:
+            return 0.5 * lam * float(np.dot(diff * R_full, diff))
+        return 0.5 * lam * float(diff @ (R_full @ diff))
+
+    def _reg_grad(pi):
+        if not reg_active:
+            return 0.0
+        diff = pi - beta_0_full
+        if R_full.ndim == 1:
+            return lam * (R_full * diff)
+        return lam * (R_full @ diff)
+
     def cost(pi):
         r = W_full @ pi - tau_vec
-        return 0.5 * np.dot(r, r)
+        return 0.5 * np.dot(r, r) + _reg_term(pi)
 
     def grad(pi):
-        return WtW @ pi - Wt_tau
+        return WtW @ pi - Wt_tau + _reg_grad(pi)
 
     # Build pseudo-inertia PSD constraints per link
     constraints = []
@@ -240,17 +392,41 @@ def _cholesky_pi_jacobian(L):
     return jac
 
 
-def _solve_cholesky(W_base, tau_vec, nDoF, base_solver, weights, P_mat):
+def _solve_cholesky(W_base, tau_vec, nDoF, base_solver, weights, P_mat,
+                    lambda_reg: float = 0.0,
+                    beta_0: np.ndarray = None,
+                    R_weight: np.ndarray = None):
     """Solve LS in FULL parameter space with Cholesky reparameterisation.
 
     Each link's pseudo-inertia is parameterised as J = L L^T with L
     lower-triangular (10 free elements), guaranteeing J ≽ 0 by
-    construction.  The optimisation is unconstrained in L-space.
+    construction.  The optimisation is unconstrained in L-space. The
+    optional Tikhonov term λ‖π_full − β₀‖²_R is added to cost and the
+    gradient w.r.t. π_full propagates through the existing
+    `_cholesky_pi_jacobian` chain rule.
     """
     p_full = P_mat.shape[1]
     W_full = W_base @ P_mat  # (m, p_full)
     n_rigid = min(nDoF, p_full // 10)
     n_extra = p_full - 10 * n_rigid
+
+    # Resolve regulariser parameters in the FULL parameter space.
+    reg_active = bool(lambda_reg and lambda_reg > 0.0)
+    if reg_active:
+        if beta_0 is None:
+            beta_0_full = np.zeros(p_full)
+        else:
+            beta_0_full = np.asarray(beta_0, dtype=float).reshape(-1)
+            if beta_0_full.size != p_full:
+                raise ValueError(
+                    f"beta_0 size {beta_0_full.size} != full param count {p_full}"
+                )
+        R_full = _resolve_R_weight(R_weight, p_full)
+        lam = float(lambda_reg)
+    else:
+        beta_0_full = None
+        R_full = None
+        lam = 0.0
 
     # -- OLS initial guess on full space ------------------------------------
     pi0, _, _, _ = np.linalg.lstsq(W_full, tau_vec, rcond=None)
@@ -304,6 +480,15 @@ def _solve_cholesky(W_base, tau_vec, nDoF, base_solver, weights, P_mat):
         residual = W_eff @ pi - tau_eff
         c = 0.5 * np.dot(residual, residual)
         grad_pi = WtW @ pi - Wt_tau
+
+        if reg_active:
+            diff = pi - beta_0_full
+            if R_full.ndim == 1:
+                c += 0.5 * lam * float(np.dot(diff * R_full, diff))
+                grad_pi = grad_pi + lam * (R_full * diff)
+            else:
+                c += 0.5 * lam * float(diff @ (R_full @ diff))
+                grad_pi = grad_pi + lam * (R_full @ diff)
 
         grad_x = np.empty_like(x)
         for i in range(n_rigid):
