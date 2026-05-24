@@ -370,7 +370,7 @@ class TestStage12Integration:
         assert (out / "identification_results.npz").exists()
         # No adapted URDF produced when the export block is absent.
         assert not list(out.glob("adapted*.urdf"))
-        allowed_json = {"results_summary.json", "regressor_model.json"}
+        allowed_json = {"results_summary.json"}
         assert all(p.name in allowed_json for p in out.glob("*.json"))
         summary = json.loads((out / "results_summary.json").read_text())
         assert "export" not in summary

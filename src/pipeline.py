@@ -169,6 +169,11 @@ class SystemIdentificationPipeline:
                 self._run_stage_6(ctx)
                 self._save_excitation_trajectory(ctx)
                 self._save_checkpoint(ctx)
+                self._export_external_artifacts(
+                    ctx=ctx,
+                    pi=ctx["true_nominal_params"],
+                    kind="nominal",
+                )
                 log.info("Pipeline stopped after excitation (checkpoint saved).")
 
             else:
@@ -238,11 +243,6 @@ class SystemIdentificationPipeline:
             backend=cfg["method"],
             cache_dir=self.output_dir / "el_cache",
         )
-        regressor_artifacts = regressor_model.save_artifacts(self.output_dir)
-        log.info(
-            "Regressor model saved: %s",
-            regressor_artifacts["metadata_path"],
-        )
         if regressor_model.el_kept_cols is not None:
             log.info(
                 "EL backend wrapped to full columns: kept %d of %d.",
@@ -267,7 +267,6 @@ class SystemIdentificationPipeline:
             "tau_lim": tau_lim,
             "torque_limit_sources": torque_limit_sources,
             "regressor_model": regressor_model,
-            "regressor_artifacts": regressor_artifacts,
             "regressor_fn": regressor_fn,
             "augmented_regressor_fn": augmented_regressor_fn,
             "el_kept_cols": el_kept_cols,
@@ -502,7 +501,7 @@ class SystemIdentificationPipeline:
             log.info("Torque validation saved to %s", torque_path)
 
         log.info("-- Stage 12: Saving outputs --")
-        regressor_meta = self._regressor_artifact_summary(ctx)
+        regressor_meta = self._regressor_metadata_summary(ctx)
         results = {
             "pi_identified": identification["pi_identified_full"],
             "pi_base": identification["pi_base"],
@@ -522,8 +521,6 @@ class SystemIdentificationPipeline:
             if torque_limit_sources is not None
             else np.array([], dtype=object),
             "sequential_history": np.array(sequential_history, dtype=object),
-            "regressor_model_path": np.array(regressor_meta["artifact_path"]),
-            "regressor_function_path": np.array(regressor_meta["function_path"]),
             "regressor_backend": np.array(regressor_meta["backend"]),
             "regressor_joint_names": np.array(
                 regressor_meta["joint_names"], dtype=object
@@ -536,11 +533,18 @@ class SystemIdentificationPipeline:
             ),
             "n_rigid_params": np.int64(regressor_meta["n_rigid_params"]),
             "n_augmented_params": np.int64(regressor_meta["n_augmented_params"]),
-            "regressor_metadata_json": np.array(json.dumps(regressor_meta)),
         }
         out_path = self.output_dir / "identification_results.npz"
         np.savez(str(out_path), **results)
         log.info("Results saved to %s", out_path)
+
+        self._export_external_artifacts(
+            ctx=ctx,
+            pi=identification["pi_corrected"],
+            kind="identified",
+            residual=float(identification["residual"]),
+            feasibility_method=cfg["identification"].get("feasibility_method"),
+        )
 
         summary_path = self.output_dir / "results_summary.json"
         summary = {
@@ -738,17 +742,10 @@ class SystemIdentificationPipeline:
             "force_load": bool(cache_cfg.get("force_load", False)),
         }
 
-    def _regressor_artifact_summary(self, ctx):
+    def _regressor_metadata_summary(self, ctx):
         model = ctx["regressor_model"]
-        artifacts = ctx["regressor_artifacts"]
-        metadata = model.metadata_dict(
-            urdf_path=artifacts["urdf_path"],
-            artifact_dir=self.output_dir,
-        )
+        metadata = model.metadata_dict()
         return {
-            "artifact_path": artifacts["metadata_path"],
-            "urdf_path": artifacts["urdf_path"],
-            "function_path": artifacts["shim_path"],
             "backend": metadata["backend"],
             "joint_names": metadata["joint_names"],
             "rigid_parameter_names": metadata["rigid_parameter_names"],
@@ -757,6 +754,29 @@ class SystemIdentificationPipeline:
             "n_friction_params": metadata["n_friction_params"],
             "n_augmented_params": metadata["n_augmented_params"],
         }
+
+    def _export_external_artifacts(self, *, ctx, pi, kind,
+                                   residual=None, feasibility_method=None):
+        """Emit the standalone regressor module and pickled parameter vector."""
+        from .regressor_export import (
+            export_parameter_pickle,
+            export_standalone,
+        )
+        model = ctx["regressor_model"]
+        regressor_path = export_standalone(model, self.output_dir)
+        pickle_path = export_parameter_pickle(
+            model,
+            self.output_dir,
+            pi=pi,
+            kind=kind,
+            residual=residual,
+            feasibility_method=feasibility_method,
+        )
+        self.logger.info(
+            "External artifacts written: %s, %s (kind=%s).",
+            regressor_path, pickle_path, kind,
+        )
+        return regressor_path, pickle_path
 
     def _rigid_nominal_vector(self, kin, el_kept_cols):
         """Return the rigid-body nominal parameter vector."""

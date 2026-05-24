@@ -71,7 +71,7 @@ A path may point at either a `.npz` file directly or a directory containing `mea
 Common invocations map directly onto these flags:
 
 - **Full Mode-1 pipeline** - `stages.excitation=true` and `stages.identification=true` with `identification.source="excitation"`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
-- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves the regressor artifacts (`regressor_model.json`, `regressor_model.urdf`, `regressor_function.py`), the excitation trajectory (`excitation_trajectory.npz`), and a resume checkpoint (`checkpoint.npz`, `checkpoint_config.json`) under `<output_dir>/pipeline/`.
+- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves the standalone external-use artifacts (`regressor.py`, `parameters.pkl`), the excitation trajectory (`excitation_trajectory.npz`), and a resume checkpoint (`checkpoint.npz`, `checkpoint_config.json`) under `<output_dir>/pipeline/`. The pickled vector carries the URDF-extracted nominal parameters (`kind="nominal"`).
 - **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and top-level `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11. Setting `checkpoint` together with `stages.excitation=true` is an error; the two modes are mutually exclusive.
 - **Validate an existing excitation** - `stages.validation=true`, `stages.excitation=false`, `validation.source="pybullet"`, and `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
 - **Mode 2 identification + measurement validation** - `stages.identification=true` and `stages.validation=true`, with both `identification.source` and `validation.source` pointing at measurement files. The excitation stage is automatically disabled.
@@ -244,12 +244,28 @@ torque limits with this precedence:
 All pipeline outputs are written to `<output_dir>/pipeline/`:
 
 - `pipeline.log` -- detailed log of every stage
-- `regressor_model.json` -- regressor metadata including backend, joint names,
-  parameter names, and the rigid/friction parameter counts
-- `regressor_model.urdf` -- resolved URDF snapshot used by the exported
-  regressor model
-- `regressor_function.py` -- importable shim exposing `Y_rigid`,
-  `Y_augmented`, and `Y`
+- `regressor.py` -- standalone callable regressor module. NumPy is its
+  only runtime dependency; it does not import any `src.*` module and can
+  be copied into another project as-is. Public API: `Y_rigid(q, dq, ddq)`
+  → `(nDoF, 10*nDoF)`, `Y_augmented(q, dq, ddq)` → `(nDoF, 10*nDoF + n_friction)`,
+  `Y(q, dq, ddq)` (alias for `Y_augmented`), `tau(q, dq, ddq, pi=None)`,
+  `Y_stack(q_traj, dq_traj, ddq_traj)`, `tau_traj(q_traj, dq_traj, ddq_traj, pi=None)`,
+  and a `META` dict carrying joint/link names, parameter names, friction
+  model, backend, and gravity. `tau` auto-dispatches between the rigid
+  and augmented regressors based on the length of `pi`; with `pi=None`
+  it loads the sibling `parameters.pkl` automatically. Inputs accept
+  `(nDoF,)` single states or `(N, nDoF)` / `(nDoF, N)` batched
+  trajectories
+- `parameters.pkl` -- pickled `dict` carrying the parameter vector and
+  metadata for external simulation. Keys: `pi`/`pi_augmented` (length
+  `10*nDoF + n_friction`), `pi_rigid` (first `10*nDoF` entries),
+  `pi_friction` (remainder), `kind` (`"nominal"` for excitation-only
+  runs, `"identified"` after identification), `nDoF`, `joint_names`,
+  `link_names`, `friction_model`, `backend`, `rigid_parameter_names`,
+  `friction_parameter_names`, `augmented_parameter_names`, the
+  parameter-count fields, `gravity`, `residual`, and
+  `feasibility_method`. Loads with `pickle.load` and requires no project
+  modules
 - `excitation_trajectory.npz` -- optimised trajectory parameters (`params`,
   `freqs`, `q0`, `basis`, `optimize_phase`, `cost`) plus the dense time series
   (`t`, `q`, `dq`, `ddq`, shape `(nDoF, N)`) and joint limits (`q_lim`,

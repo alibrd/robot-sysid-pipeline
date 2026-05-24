@@ -1429,12 +1429,7 @@ STAGE 12: LMI-constrained NE identification must return a feasible model
 ## Stage 12. Save Outputs, Write Logs, Optionally Export an Adapted URDF, and Interpret Success Correctly
 
 ### Output artifacts
-The pipeline writes the following files under `<output_dir>/pipeline/`. Note that the regressor artifacts are emitted in **Stage 4** (so they appear in every pipeline-running mode, including excitation-only and Mode 2), while the remaining files are emitted by later stages:
-
-Stage 4 (always written when the pipeline runs):
-- `regressor_model.json`
-- `regressor_model.urdf`
-- `regressor_function.py`
+The pipeline writes the following files under `<output_dir>/pipeline/`.
 
 Stage 6:
 - `excitation_trajectory.npz`
@@ -1443,6 +1438,8 @@ Stage 6:
 Stage 12:
 - `identification_results.npz`
 - `results_summary.json`
+- `regressor.py` — standalone callable regressor module (see "External-use artifact contract" below). Emitted in both excitation-only and full pipeline runs.
+- `parameters.pkl` — pickled parameter vector with metadata. In excitation-only runs the payload carries the URDF-extracted nominal vector (`kind="nominal"`); in full runs it carries the identified-corrected vector (`kind="identified"`).
 - `<export.urdf_filename>` (default `adapted_robot.urdf`) when `export.enabled=true`
 - `<export.friction_sidecar_filename>` (default `adapted_friction.json`) when `export.enabled=true`, `friction.model != "none"`, and `export.friction_sidecar=true`
 
@@ -1451,6 +1448,32 @@ Other:
 - `observation_matrix_cache.npz` when observation-matrix cache saving is enabled
 
 These are orchestrated from [`src/pipeline.py`](../src/pipeline.py), with logging configured in [`src/pipeline_logger.py`](../src/pipeline_logger.py).
+
+### External-use artifact contract
+
+`regressor.py` and `parameters.pkl` form a portable pair that a downstream user can copy into another Python project without bringing the rest of this repository along. The generated module imports only `numpy`, `pickle`, and `pathlib`; the Newton-Euler export inlines a local `_skew` helper and the friction block, and the Euler-Lagrange export prints the cached symbolic regressor `Y_sym` entry-by-entry. Code generation lives in [`src/regressor_export.py`](../src/regressor_export.py).
+
+Public surface of the emitted module:
+
+- `Y_rigid(q, dq, ddq)` returns the rigid-body regressor with shape `(nDoF, 10·nDoF)`.
+- `Y_augmented(q, dq, ddq)` returns the friction-augmented regressor with shape `(nDoF, 10·nDoF + n_friction)`.
+- `Y(q, dq, ddq)` is an alias for `Y_augmented`.
+- `tau(q, dq, ddq, pi=None)` performs inverse dynamics. Length-`10·nDoF` `pi` selects `Y_rigid`; length-`10·nDoF + n_friction` `pi` selects `Y_augmented`; the routine raises `ValueError` for any other length. When `pi=None`, the module reads the sibling `parameters.pkl` and uses its `pi_augmented` field; a missing pickle raises `FileNotFoundError`.
+- `Y_stack(q_traj, dq_traj, ddq_traj)` and `tau_traj(q_traj, dq_traj, ddq_traj, pi=None)` evaluate trajectories (`(N, nDoF)` or `(nDoF, N)`).
+- `META` is a module-level `dict` mirroring the regressor metadata (backend, friction model, joint names, link names, parameter names, parameter counts, gravity).
+
+Pickle keys in `parameters.pkl`:
+
+- `pi`, `pi_augmented` — augmented parameter vector, length `10·nDoF + n_friction`.
+- `pi_rigid` — first `10·nDoF` entries of the augmented vector.
+- `pi_friction` — remaining `n_friction` entries (empty when `friction.model="none"`).
+- `kind` — `"nominal"` or `"identified"`.
+- `nDoF`, `joint_names`, `link_names`, `friction_model`, `backend`.
+- `rigid_parameter_names`, `friction_parameter_names`, `augmented_parameter_names`.
+- `n_rigid_params`, `n_friction_params`, `n_augmented_params`.
+- `gravity`, `residual`, `feasibility_method` (the last two are `None` in nominal mode).
+
+The pickle uses only stdlib types and `numpy.ndarray`, so `pickle.load` works in a process that has no access to `src.*`.
 
 The unified entry point [`sysid.py`](../sysid.py) uses
 [`src/runner.py`](../src/runner.py) to translate one JSON config into the

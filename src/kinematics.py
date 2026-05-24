@@ -25,6 +25,14 @@ class LinkKinematics:
         self.pRi_1_i = sympy.lambdify(q_sym, pR_sym, modules="numpy")
         self.paJi_1_i = sympy.lambdify(q_sym, paJ_sym, modules="numpy")
 
+        # Retain symbolic forms for the standalone regressor export
+        # (regressor_export.py walks them to emit numpy source).
+        self.T_sym = T_sym
+        self.aJ_sym = aJ_sym
+        self.pR_sym = pR_sym
+        self.paJ_sym = paJ_sym
+        self.q_sym = q_sym
+
     @staticmethod
     def _build_transform(R0, Rq, di):
         """Build T_{i-1,i} with translation di = origin_xyz of this joint.
