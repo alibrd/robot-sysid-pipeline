@@ -43,7 +43,7 @@ The unified config has a `stages` block with six boolean flags:
 
 | Flag | What it does |
 |---|---|
-| `excitation` | Run pipeline Stages 1-6; emits the regressor artifacts (Stage 4) and excitation trajectory (Stage 6). Excitation-only runs additionally save a resume checkpoint. |
+| `excitation` | Run pipeline Stages 1-6; emits the excitation trajectory (Stage 6). Excitation-only runs additionally save a resume checkpoint and the external-use regressor artifacts (`regressor.py`, `parameters.pkl`) as a Stage-12-equivalent save step. |
 | `identification` | Run pipeline Stages 7-11 (observation matrix, base parameters, solver, feasibility, results) |
 | `validation` | Compare the identified model against either PyBullet inverse dynamics or real measurements (selected via `validation.source`) |
 | `report` | Export a Markdown summary, CSV table, and per-joint plots from a validation run |
