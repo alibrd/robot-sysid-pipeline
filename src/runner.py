@@ -65,6 +65,7 @@ _KNOWN_TOP_LEVEL_KEYS = {
     "downsampling",
     "plot",
     "export",
+    "dynamics_model",
     "advanced",
 }
 
@@ -557,6 +558,7 @@ class UnifiedRunner:
             "filtering": deepcopy(cfg.get("filtering", {})),
             "downsampling": deepcopy(cfg.get("downsampling", {})),
             "export": deepcopy(cfg.get("export", {})),
+            "dynamics_model": deepcopy(cfg.get("dynamics_model", {})),
         }
 
         # Run the pipeline-config validator so that every existing

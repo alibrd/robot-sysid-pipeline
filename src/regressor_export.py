@@ -59,6 +59,335 @@ def export_standalone(model: RegressorModel, output_dir: str | Path) -> Path:
     return path
 
 
+def export_dynamics_model_closed_form(
+        model: RegressorModel,
+        pi_aug: np.ndarray,
+        output_dir: str | Path,
+        *,
+        simplify: str = "trigsimp",
+        include_coriolis_matrix: bool = False) -> Path:
+    """Emit standalone closed-form ``dynamics_model.py`` to *output_dir*.
+
+    The emitted module has
+
+        tau(q, dq, ddq) = M(q) @ ddq + c(q, dq) + g(q) + tau_f(dq)
+
+    where each of ``M``, ``c``, ``g``, ``tau_f`` is a pure NumPy closed-form
+    function of its inputs with the active parameter vector baked into the
+    printed source. No ``parameters.pkl``, no inter-function calls.
+
+    Parameters
+    ----------
+    model : RegressorModel
+        Provides nDoF, friction model, and access to the cached symbolic EL
+        regressor. The EL symbolic build is forced/loaded regardless of the
+        runtime backend.
+    pi_aug : ndarray
+        Augmented parameter vector of length ``10*nDoF + n_friction``.
+    output_dir : str | Path
+        Destination directory; the file is written as
+        ``<output_dir>/dynamics_model.py``.
+    simplify : {"none", "trigsimp", "full"}
+        SymPy simplification pass applied to each printed expression.
+    include_coriolis_matrix : bool
+        Also emit a closed-form Christoffel ``C(q, dq)`` such that
+        ``c = C @ dq``.
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    n = model.nDoF
+    n_rigid = 10 * n
+    n_fric = model.n_friction_params
+
+    pi_aug = np.asarray(pi_aug, dtype=float).reshape(-1)
+    expected = n_rigid + n_fric
+    if pi_aug.size != expected:
+        raise ValueError(
+            f"pi_aug has {pi_aug.size} entries, expected {expected} "
+            f"({n_rigid} rigid + {n_fric} friction)."
+        )
+    pi_rigid_num = pi_aug[:n_rigid]
+    pi_friction_num = pi_aug[n_rigid:]
+
+    Y_sym, kept_cols = _load_symbolic_rigid_regressor(model)
+    q_syms = [sympy.Symbol(f"q{i + 1}") for i in range(n)]
+    dq_syms = [sympy.Symbol(f"dq{i + 1}") for i in range(n)]
+    ddq_syms = [sympy.Symbol(f"ddq{i + 1}") for i in range(n)]
+
+    # tau_rigid[i] = sum_k pi_rigid[k] * Y_sym_full[i, k], skipping zero-coef.
+    tau_rigid = []
+    for i in range(n):
+        expr = sympy.S.Zero
+        for c_idx, k in enumerate(kept_cols):
+            coef = float(pi_rigid_num[k])
+            if coef == 0.0:
+                continue
+            expr = expr + sympy.Float(coef) * Y_sym[i, c_idx]
+        tau_rigid.append(expr)
+
+    zero_dq = {dq_syms[i]: sympy.S.Zero for i in range(n)}
+    zero_ddq = {ddq_syms[i]: sympy.S.Zero for i in range(n)}
+
+    g_sym = [sympy.expand(tau_rigid[i].subs(zero_dq).subs(zero_ddq))
+             for i in range(n)]
+    M_sym = [
+        [sympy.diff(tau_rigid[i], ddq_syms[j]) for j in range(n)]
+        for i in range(n)
+    ]
+    c_sym = [
+        sympy.expand(tau_rigid[i].subs(zero_ddq) - g_sym[i])
+        for i in range(n)
+    ]
+
+    if include_coriolis_matrix:
+        C_sym = [[sympy.S.Zero for _ in range(n)] for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                expr = sympy.S.Zero
+                for k in range(n):
+                    G_ijk = sympy.Rational(1, 2) * (
+                        sympy.diff(M_sym[i][j], q_syms[k])
+                        + sympy.diff(M_sym[i][k], q_syms[j])
+                        - sympy.diff(M_sym[j][k], q_syms[i])
+                    )
+                    expr = expr + G_ijk * dq_syms[k]
+                C_sym[i][j] = expr
+    else:
+        C_sym = None
+
+    tau_f_sym = _sympy_friction_block(
+        dq_syms, model.friction_model, pi_friction_num, n
+    )
+
+    simplifier = _resolve_simplifier(simplify)
+    if simplifier is not None:
+        for i in range(n):
+            g_sym[i] = simplifier(g_sym[i])
+            c_sym[i] = simplifier(c_sym[i])
+            tau_f_sym[i] = simplifier(tau_f_sym[i])
+            for j in range(n):
+                M_sym[i][j] = simplifier(M_sym[i][j])
+            if C_sym is not None:
+                for j in range(n):
+                    C_sym[i][j] = simplifier(C_sym[i][j])
+
+    aliases = {}
+    for i in range(n):
+        aliases[q_syms[i]] = sympy.Symbol(f"q_{i}")
+        aliases[dq_syms[i]] = sympy.Symbol(f"dq_{i}")
+
+    def _alias(e):
+        return e.xreplace(aliases) if hasattr(e, "xreplace") else e
+
+    g_sym = [_alias(e) for e in g_sym]
+    c_sym = [_alias(e) for e in c_sym]
+    M_sym = [[_alias(M_sym[i][j]) for j in range(n)] for i in range(n)]
+    tau_f_sym = [_alias(e) for e in tau_f_sym]
+    if C_sym is not None:
+        C_sym = [[_alias(C_sym[i][j]) for j in range(n)] for i in range(n)]
+
+    source = _emit_dynamics_module_source(
+        model=model,
+        g_sym=g_sym,
+        M_sym=M_sym,
+        c_sym=c_sym,
+        tau_f_sym=tau_f_sym,
+        C_sym=C_sym,
+    )
+    path = out_dir / "dynamics_model.py"
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def _load_symbolic_rigid_regressor(model: RegressorModel):
+    """Return ``(Y_sym, kept_cols)`` for the EL symbolic rigid regressor."""
+    kin = model.kin
+    cache_dir = model._el_cache_dir()
+    cache_path = Path(cache_dir) / "el_regressor_cache.pkl"
+    if not cache_path.exists():
+        euler_lagrange_regressor_builder(kin, cache_dir)
+    with open(cache_path, "rb") as f:
+        data = pickle.load(f)
+    Y_sym = data["Y_sym"]
+    kept_cols = [int(c) for c in data["kept_cols"]]
+    return Y_sym, kept_cols
+
+
+def _sympy_friction_block(dq_syms, friction_model, pi_friction_num, n):
+    """Return list of length-n symbolic friction torques with baked params."""
+    expr_list = [sympy.S.Zero for _ in range(n)]
+    if friction_model == "none" or pi_friction_num.size == 0:
+        return expr_list
+    a = sympy.Float(10.0)
+    b = sympy.Float(1000.0)
+    offset = 0
+    if friction_model in ("viscous", "viscous_coulomb"):
+        for i in range(n):
+            coef = float(pi_friction_num[offset + i])
+            if coef != 0.0:
+                expr_list[i] = expr_list[i] + sympy.Float(coef) * dq_syms[i]
+        offset += n
+    if friction_model in ("coulomb", "viscous_coulomb"):
+        for i in range(n):
+            coef = float(pi_friction_num[offset + i])
+            if coef != 0.0:
+                expr_list[i] = expr_list[i] + sympy.Float(coef) / (
+                    1 + sympy.exp(a - b * dq_syms[i])
+                )
+        offset += n
+        for i in range(n):
+            coef = float(pi_friction_num[offset + i])
+            if coef != 0.0:
+                expr_list[i] = expr_list[i] - sympy.Float(coef) / (
+                    1 + sympy.exp(a + b * dq_syms[i])
+                )
+        offset += n
+    return expr_list
+
+
+def _resolve_simplifier(name):
+    if name in (None, "none", ""):
+        return None
+    if name == "trigsimp":
+        return sympy.trigsimp
+    if name == "full":
+        return sympy.simplify
+    raise ValueError(
+        f"Unknown simplify mode {name!r}; expected 'none', 'trigsimp', or 'full'."
+    )
+
+
+def _emit_dynamics_module_source(*, model, g_sym, M_sym, c_sym,
+                                 tau_f_sym, C_sym):
+    n = model.nDoF
+    friction_model = model.friction_model
+
+    header = (
+        '"""Standalone closed-form dynamics model.\n\n'
+        "Generated by the sysid pipeline. Self-contained: pure NumPy, no\n"
+        "sibling-file dependencies, no inter-function calls at runtime.\n\n"
+        "    tau(q, dq, ddq) = M(q) @ ddq + c(q, dq) + g(q) + tau_f(dq)\n\n"
+        "Each of M(q), g(q), c(q, dq), tau_f(dq) is a closed-form NumPy\n"
+        "expression in its inputs with the active parameter vector baked\n"
+        "in at export time. The only inter-function calls happen inside\n"
+        "the convenience wrapper ``tau``; individual terms are pure.\n\n"
+        f"nDoF: {n}\n"
+        f"friction_model: {friction_model}\n"
+        '"""\n'
+        "from __future__ import annotations\n\n"
+        "import numpy\n\n\n"
+        f"_NDOF = {n}\n"
+        f"_FRICTION_MODEL = {friction_model!r}\n\n\n"
+        "def _coerce(v, n=_NDOF):\n"
+        "    a = numpy.asarray(v, dtype=float).reshape(-1)\n"
+        "    if a.size != n:\n"
+        '        raise ValueError(f"expected {n} entries, got {a.size}.")\n'
+        "    return a\n\n\n"
+    )
+
+    blocks = [header]
+    blocks.append(_emit_g_function(g_sym, n))
+    blocks.append(_emit_M_function(M_sym, n))
+    blocks.append(_emit_c_function(c_sym, n))
+    blocks.append(_emit_tau_f_function(tau_f_sym, n))
+    if C_sym is not None:
+        blocks.append(_emit_C_function(C_sym, n))
+    blocks.append(_emit_tau_function())
+    return "".join(blocks)
+
+
+def _vec_body(exprs, n, indent="        "):
+    cells = [_PRINTER.doprint(exprs[i]) for i in range(n)]
+    return (",\n" + indent).join(cells)
+
+
+def _mat_body(rows, n, indent="        "):
+    row_strs = []
+    for i in range(n):
+        cells = [_PRINTER.doprint(rows[i][j]) for j in range(n)]
+        row_strs.append("[" + ", ".join(cells) + "]")
+    return (",\n" + indent).join(row_strs)
+
+
+def _emit_g_function(g_sym, n):
+    locals_q = "; ".join(f"q_{i} = q[{i}]" for i in range(n))
+    body = _vec_body(g_sym, n)
+    return (
+        "def g(q):\n"
+        "    q = _coerce(q)\n"
+        f"    {locals_q}\n"
+        "    return numpy.array([\n"
+        f"        {body},\n"
+        "    ], dtype=float)\n\n\n"
+    )
+
+
+def _emit_M_function(M_sym, n):
+    locals_q = "; ".join(f"q_{i} = q[{i}]" for i in range(n))
+    body = _mat_body(M_sym, n)
+    return (
+        "def M(q):\n"
+        "    q = _coerce(q)\n"
+        f"    {locals_q}\n"
+        "    return numpy.array([\n"
+        f"        {body},\n"
+        "    ], dtype=float)\n\n\n"
+    )
+
+
+def _emit_c_function(c_sym, n):
+    locals_q = "; ".join(f"q_{i} = q[{i}]" for i in range(n))
+    locals_dq = "; ".join(f"dq_{i} = dq[{i}]" for i in range(n))
+    body = _vec_body(c_sym, n)
+    return (
+        "def c(q, dq):\n"
+        "    q = _coerce(q); dq = _coerce(dq)\n"
+        f"    {locals_q}\n"
+        f"    {locals_dq}\n"
+        "    return numpy.array([\n"
+        f"        {body},\n"
+        "    ], dtype=float)\n\n\n"
+    )
+
+
+def _emit_tau_f_function(tau_f_sym, n):
+    locals_dq = "; ".join(f"dq_{i} = dq[{i}]" for i in range(n))
+    body = _vec_body(tau_f_sym, n)
+    return (
+        "def tau_f(dq):\n"
+        "    dq = _coerce(dq)\n"
+        f"    {locals_dq}\n"
+        "    return numpy.array([\n"
+        f"        {body},\n"
+        "    ], dtype=float)\n\n\n"
+    )
+
+
+def _emit_C_function(C_sym, n):
+    locals_q = "; ".join(f"q_{i} = q[{i}]" for i in range(n))
+    locals_dq = "; ".join(f"dq_{i} = dq[{i}]" for i in range(n))
+    body = _mat_body(C_sym, n)
+    return (
+        "def C(q, dq):\n"
+        "    q = _coerce(q); dq = _coerce(dq)\n"
+        f"    {locals_q}\n"
+        f"    {locals_dq}\n"
+        "    return numpy.array([\n"
+        f"        {body},\n"
+        "    ], dtype=float)\n\n\n"
+    )
+
+
+def _emit_tau_function():
+    return (
+        "def tau(q, dq, ddq):\n"
+        '    """Total inverse-dynamics torque: M(q)@ddq + c(q,dq) + g(q) + tau_f(dq)."""\n'
+        "    ddq = _coerce(ddq)\n"
+        "    return M(q) @ ddq + c(q, dq) + g(q) + tau_f(dq)\n"
+    )
+
+
 def export_parameter_pickle(model: RegressorModel,
                             output_dir: str | Path,
                             pi: np.ndarray,

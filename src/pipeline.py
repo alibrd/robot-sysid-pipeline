@@ -643,6 +643,134 @@ class SystemIdentificationPipeline:
             with open(summary_path, "w", encoding="utf-8") as f:
                 json.dump(summary, f, indent=2)
 
+        # ---- Stage 12 (cont.): optional dynamics-model trajectory dump ---
+        dyn_cfg = cfg.get("dynamics_model") or {}
+        if dyn_cfg.get("export_npz", False):
+            self._dump_dynamics_model_trajectory(
+                ctx=ctx,
+                identification=identification,
+                dyn_cfg=dyn_cfg,
+                summary=summary,
+                summary_path=summary_path,
+            )
+
+    def _dump_dynamics_model_trajectory(self, *, ctx, identification,
+                                        dyn_cfg, summary, summary_path):
+        """Write dynamics_model.npz: M/c/g/tau_f (and optional C) along the trajectory."""
+        log = self.logger
+        cfg = self.cfg
+        kin = ctx["kin"]
+        log.info("Stage 12: exporting dynamics_model.npz trajectory dump")
+        from .dynamics_model import (
+            compute_full_dynamics,
+            coriolis_matrix_christoffel,
+            split_pi_aug,
+            verify_dynamics_consistency,
+        )
+
+        friction_model = cfg["friction"]["model"]
+        pi_aug = np.asarray(
+            identification["pi_corrected"], dtype=float
+        ).reshape(-1)
+        pi_rigid, pi_friction = split_pi_aug(pi_aug, kin.nDoF, friction_model)
+        rigid_fn = ctx["regressor_model"].rigid
+        include_friction = (
+            bool(dyn_cfg.get("include_friction_torque", True))
+            and friction_model != "none"
+        )
+
+        q_data = ctx["q_data"]
+        dq_data = ctx["dq_data"]
+        ddq_data = ctx["ddq_data"]
+        n_samples = q_data.shape[0]
+        mid = n_samples // 2
+        _, _, consistency_err = verify_dynamics_consistency(
+            rigid_fn, pi_rigid,
+            q_data[mid], dq_data[mid], ddq_data[mid],
+            pi_friction=pi_friction if include_friction else None,
+            friction_model=friction_model if include_friction else "none",
+        )
+        log.info("Dynamics model consistency error: %.3e", consistency_err)
+        if consistency_err > 1e-8:
+            log.warning(
+                "Dynamics model consistency error %.3e exceeds 1e-8.",
+                consistency_err,
+            )
+
+        out = {
+            "pi_rigid": pi_rigid,
+            "pi_friction": pi_friction,
+            "friction_model": np.array(friction_model),
+            "nDoF": np.int64(kin.nDoF),
+            "consistency_error": np.float64(consistency_err),
+        }
+        evaluation_points = dyn_cfg.get("evaluation_points", "trajectory")
+        if evaluation_points == "trajectory":
+            n = kin.nDoF
+            g_traj = np.zeros((n_samples, n))
+            M_traj = np.zeros((n_samples, n, n))
+            c_traj = np.zeros((n_samples, n))
+            tau_f_traj = (
+                np.zeros((n_samples, n)) if include_friction else None
+            )
+            include_C = bool(dyn_cfg.get("include_coriolis_matrix", False))
+            C_traj = np.zeros((n_samples, n, n)) if include_C else None
+            for k in range(n_samples):
+                dk = compute_full_dynamics(
+                    rigid_fn, pi_rigid, q_data[k], dq_data[k],
+                    pi_friction=pi_friction if include_friction else None,
+                    friction_model=(
+                        friction_model if include_friction else "none"
+                    ),
+                )
+                g_traj[k] = dk["g"]
+                M_traj[k] = dk["M"]
+                c_traj[k] = dk["c"]
+                if tau_f_traj is not None:
+                    tau_f_traj[k] = dk["tau_f"]
+                if C_traj is not None:
+                    C_traj[k] = coriolis_matrix_christoffel(
+                        rigid_fn, pi_rigid, q_data[k], dq_data[k],
+                    )
+            out["g_trajectory"] = g_traj
+            out["M_trajectory"] = M_traj
+            out["c_trajectory"] = c_traj
+            if tau_f_traj is not None:
+                out["tau_f_trajectory"] = tau_f_traj
+            if C_traj is not None:
+                out["C_trajectory"] = C_traj
+        elif evaluation_points == "sample":
+            dk = compute_full_dynamics(
+                rigid_fn, pi_rigid, q_data[mid], dq_data[mid],
+                pi_friction=pi_friction if include_friction else None,
+                friction_model=friction_model if include_friction else "none",
+            )
+            out["g_sample"] = dk["g"]
+            out["M_sample"] = dk["M"]
+            out["c_sample"] = dk["c"]
+            if include_friction:
+                out["tau_f_sample"] = dk["tau_f"]
+        else:
+            raise ValueError(
+                "dynamics_model.evaluation_points must be "
+                "'trajectory' or 'sample'."
+            )
+
+        dyn_path = self.output_dir / "dynamics_model.npz"
+        np.savez(str(dyn_path), **out)
+        log.info("Dynamics model trajectory saved to %s", dyn_path)
+        summary["dynamics_model"] = {
+            "path": str(dyn_path),
+            "consistency_error": consistency_err,
+            "include_friction_torque": include_friction,
+            "include_coriolis_matrix": bool(
+                dyn_cfg.get("include_coriolis_matrix", False)
+            ),
+            "evaluation_points": evaluation_points,
+        }
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
     # ------------------------------------------------------------------
     # Checkpoint save / load
     # ------------------------------------------------------------------
@@ -757,8 +885,10 @@ class SystemIdentificationPipeline:
 
     def _export_external_artifacts(self, *, ctx, pi, kind,
                                    residual=None, feasibility_method=None):
-        """Emit the standalone regressor module and pickled parameter vector."""
+        """Emit the standalone regressor module, pickled parameters, and
+        closed-form dynamics model."""
         from .regressor_export import (
+            export_dynamics_model_closed_form,
             export_parameter_pickle,
             export_standalone,
         )
@@ -772,11 +902,21 @@ class SystemIdentificationPipeline:
             residual=residual,
             feasibility_method=feasibility_method,
         )
-        self.logger.info(
-            "External artifacts written: %s, %s (kind=%s).",
-            regressor_path, pickle_path, kind,
+        dyn_cfg = self.cfg.get("dynamics_model") or {}
+        dynamics_path = export_dynamics_model_closed_form(
+            model,
+            pi_aug=pi,
+            output_dir=self.output_dir,
+            simplify=dyn_cfg.get("simplify", "trigsimp"),
+            include_coriolis_matrix=bool(
+                dyn_cfg.get("include_coriolis_matrix", False)
+            ),
         )
-        return regressor_path, pickle_path
+        self.logger.info(
+            "External artifacts written: %s, %s, %s (kind=%s).",
+            regressor_path, pickle_path, dynamics_path, kind,
+        )
+        return regressor_path, pickle_path, dynamics_path
 
     def _rigid_nominal_vector(self, kin, el_kept_cols):
         """Return the rigid-body nominal parameter vector."""

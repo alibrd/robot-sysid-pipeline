@@ -289,3 +289,17 @@ def _validate(cfg: dict, path: str):
                     f"[{path}] 'export.{fn_key}' must be a plain filename "
                     f"relative to output_dir, got '{v}'"
                 )
+
+    dyn = cfg.get("dynamics_model") or {}
+    simplify = dyn.get("simplify", "trigsimp")
+    if simplify not in {"none", "trigsimp", "full"}:
+        raise ValueError(
+            "'dynamics_model.simplify' must be one of "
+            "{'none', 'trigsimp', 'full'}"
+        )
+    evaluation_points = dyn.get("evaluation_points", "trajectory")
+    if evaluation_points not in {"trajectory", "sample"}:
+        raise ValueError(
+            "'dynamics_model.evaluation_points' must be one of "
+            "{'trajectory', 'sample'}"
+        )

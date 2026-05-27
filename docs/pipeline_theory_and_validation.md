@@ -1440,6 +1440,8 @@ Stage 12:
 - `results_summary.json`
 - `regressor.py` — standalone callable regressor module (see "External-use artifact contract" below). Emitted in both excitation-only and full pipeline runs.
 - `parameters.pkl` — pickled parameter vector with metadata. In excitation-only runs the payload carries the URDF-extracted nominal vector (`kind="nominal"`); in full runs it carries the identified-corrected vector (`kind="identified"`).
+- `dynamics_model.py` — standalone closed-form dynamics module with the active parameter vector baked into the source.
+- `dynamics_model.npz` when `dynamics_model.export_npz=true`
 - `<export.urdf_filename>` (default `adapted_robot.urdf`) when `export.enabled=true`
 - `<export.friction_sidecar_filename>` (default `adapted_friction.json`) when `export.enabled=true`, `friction.model != "none"`, and `export.friction_sidecar=true`
 
@@ -1474,6 +1476,29 @@ Pickle keys in `parameters.pkl`:
 - `gravity`, `residual`, `feasibility_method` (the last two are `None` in nominal mode).
 
 The pickle uses only stdlib types and `numpy.ndarray`, so `pickle.load` works in a process that has no access to `src.*`.
+
+### Closed-form dynamics-model artifact
+
+`dynamics_model.py` is emitted alongside the regressor artifacts with no
+runtime dependency on `parameters.pkl` or `src.*`. Its public contract is
+
+$$
+\tau(q,\dot q,\ddot q) =
+M(q)\ddot q + c(q,\dot q) + g(q) + \tau_f(\dot q).
+$$
+
+The individual `M(q)`, `g(q)`, `c(q, dq)`, and `tau_f(dq)` functions are
+printed as closed-form NumPy expressions with the active inertial and friction
+parameters baked in. The wrapper `tau(q, dq, ddq)` composes those terms. When
+`dynamics_model.include_coriolis_matrix=true`, the module also exposes a
+Christoffel-form `C(q, dq)` satisfying `c(q, dq) = C(q, dq) @ dq`.
+
+When `dynamics_model.export_npz=true`, Stage 12 also writes
+`dynamics_model.npz`, a pre-evaluated term dump on either the excitation
+trajectory (`evaluation_points="trajectory"`) or one representative midpoint
+sample (`evaluation_points="sample"`). The
+`dynamics_model.include_friction_torque` flag controls whether `tau_f(dq)` is
+included in this `.npz` dump; it does not alter the baked closed-form module.
 
 The unified entry point [`sysid.py`](../sysid.py) uses
 [`src/runner.py`](../src/runner.py) to translate one JSON config into the

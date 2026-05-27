@@ -165,6 +165,7 @@ def test_excitation_and_identification_only_succeeds_without_pybullet(tmp_path, 
         def run(self):
             calls["pipeline_ran"] = True
             calls["output_dir"] = str(self.output_dir)
+            calls["dynamics_model"] = self.cfg["dynamics_model"]
 
     monkeypatch.setattr("src.runner.SystemIdentificationPipeline", FakePipeline)
     monkeypatch.setattr("src.runner._is_module_available", lambda name: False)
@@ -173,6 +174,7 @@ def test_excitation_and_identification_only_succeeds_without_pybullet(tmp_path, 
     assert rc == 0
     assert calls["pipeline_ran"]
     assert Path(calls["output_dir"]) == (tmp_path / "out" / "pipeline")
+    assert calls["dynamics_model"]["evaluation_points"] == "trajectory"
 
 
 def test_validation_stage_fails_clearly_when_pybullet_missing(tmp_path, monkeypatch):

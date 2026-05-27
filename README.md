@@ -43,7 +43,7 @@ The unified config has a `stages` block with six boolean flags:
 
 | Flag | What it does |
 |---|---|
-| `excitation` | Run pipeline Stages 1-6; emits the excitation trajectory (Stage 6). Excitation-only runs additionally save a resume checkpoint and the external-use regressor artifacts (`regressor.py`, `parameters.pkl`) as a Stage-12-equivalent save step. |
+| `excitation` | Run pipeline Stages 1-6; emits the excitation trajectory (Stage 6). Excitation-only runs additionally save a resume checkpoint and the external-use regressor artifacts (`regressor.py`, `parameters.pkl`, `dynamics_model.py`) as a Stage-12-equivalent save step. |
 | `identification` | Run pipeline Stages 7-11 (observation matrix, base parameters, solver, feasibility, results) |
 | `validation` | Compare the identified model against either PyBullet inverse dynamics or real measurements (selected via `validation.source`) |
 | `report` | Export a Markdown summary, CSV table, and per-joint plots from a validation run |
@@ -70,8 +70,8 @@ A path may point at either a `.npz` file directly or a directory containing `mea
 
 Common invocations map directly onto these flags:
 
-- **Full Mode-1 pipeline** - `stages.excitation=true` and `stages.identification=true` with `identification.source="excitation"`. Runs Stages 1-11 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
-- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves the standalone external-use artifacts (`regressor.py`, `parameters.pkl`), the excitation trajectory (`excitation_trajectory.npz`), and a resume checkpoint (`checkpoint.npz`, `checkpoint_config.json`) under `<output_dir>/pipeline/`. The pickled vector carries the URDF-extracted nominal parameters (`kind="nominal"`).
+- **Full Mode-1 pipeline** - `stages.excitation=true` and `stages.identification=true` with `identification.source="excitation"`. Runs Stages 1-12 and writes the pipeline artifacts under `<output_dir>/pipeline/`.
+- **Generate excitation only** - `stages.excitation=true` and `stages.identification=false`. Saves the standalone external-use artifacts (`regressor.py`, `parameters.pkl`, `dynamics_model.py`), the excitation trajectory (`excitation_trajectory.npz`), and a resume checkpoint (`checkpoint.npz`, `checkpoint_config.json`) under `<output_dir>/pipeline/`. The pickled vector carries the URDF-extracted nominal parameters (`kind="nominal"`) and the closed-form `dynamics_model.py` reproduces the URDF rigid-body dynamics with `tau_f` returning zeros.
 - **Resume identification from a saved excitation** - `stages.excitation=false`, `stages.identification=true`, and top-level `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner loads the saved checkpoint, reconstructs Stages 1-4 from the URDF, and continues with Stages 7-11. Setting `checkpoint` together with `stages.excitation=true` is an error; the two modes are mutually exclusive.
 - **Validate an existing excitation** - `stages.validation=true`, `stages.excitation=false`, `validation.source="pybullet"`, and `checkpoint` set to a previous `<output_dir>` or its `pipeline/` subdirectory. The runner replays the saved `excitation_trajectory.npz`.
 - **Mode 2 identification + measurement validation** - `stages.identification=true` and `stages.validation=true`, with both `identification.source` and `validation.source` pointing at measurement files. The excitation stage is automatically disabled.
@@ -156,6 +156,11 @@ Copy `config/default_config.json` and fill in the fields. The most important key
 | `export.urdf_filename` | filename | Output URDF name (must be a plain filename relative to `output_dir`; absolute paths and `..` are rejected) |
 | `export.friction_sidecar` | `true` / `false` | Also emit the asymmetric-friction JSON sidecar (only honored when `friction.model != "none"`) |
 | `export.friction_sidecar_filename` | filename | Sidecar JSON name; same plain-filename restriction as `export.urdf_filename` |
+| `dynamics_model.export_npz` | `true` / `false` | Also write the pre-evaluated `dynamics_model.npz` term dump |
+| `dynamics_model.include_coriolis_matrix` | `true` / `false` | Emit optional Christoffel `C(q, dq)` in `dynamics_model.py` and `dynamics_model.npz` |
+| `dynamics_model.include_friction_torque` | `true` / `false` | Include `tau_f(dq)` in `dynamics_model.npz`; this does not suppress baked friction in `dynamics_model.py` |
+| `dynamics_model.evaluation_points` | `trajectory` / `sample` | Dump terms along the full trajectory or at one representative sample |
+| `dynamics_model.simplify` | `none` / `trigsimp` / `full` | SymPy simplification mode for generated closed-form expressions |
 
 The pipeline uses the literature-standard SLSQP excitation formulation. The
 method-specific `excitation.torque_constraint.*` keys are:
@@ -256,6 +261,22 @@ All pipeline outputs are written to `<output_dir>/pipeline/`:
   it loads the sibling `parameters.pkl` automatically. Inputs accept
   `(nDoF,)` single states or `(N, nDoF)` / `(nDoF, N)` batched
   trajectories
+- `dynamics_model.py` -- standalone **closed-form** dynamics model
+  emitted alongside `regressor.py`. Pure NumPy, no `src.*` imports, no
+  `parameters.pkl` dependency, no inter-function calls at runtime. Each
+  of `M(q)`, `g(q)`, `c(q, dq)`, `tau_f(dq)` is a closed-form arithmetic
+  expression in its inputs with the active inertial/friction parameters
+  baked in at export time; `tau(q, dq, ddq) = M @ ddq + c + g + tau_f`
+  is the only orchestrator. Mode 1 (excitation-only) bakes in the URDF
+  nominal parameters with zero friction; Mode 2 (after identification)
+  bakes in `pi_corrected`. Optional Christoffel `C(q, dq)` is emitted
+  when `dynamics_model.include_coriolis_matrix=true`
+- `dynamics_model.npz` -- optional pre-evaluated trajectory dump
+  carrying `M(q)`, `c(q, dq)`, `g(q)`, `tau_f(dq)` (and optional
+  `C(q, dq)`) along the excitation trajectory plus a `consistency_error`
+  scalar. Written only when `dynamics_model.export_npz=true`. Setting
+  `dynamics_model.include_friction_torque=false` suppresses friction only
+  in this dump; it does not change the baked closed-form module
 - `parameters.pkl` -- pickled `dict` carrying the parameter vector and
   metadata for external simulation. Keys: `pi`/`pi_augmented` (length
   `10*nDoF + n_friction`), `pi_rigid` (first `10*nDoF` entries),

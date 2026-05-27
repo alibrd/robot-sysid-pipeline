@@ -94,6 +94,13 @@
         "friction_sidecar": true,
         "friction_sidecar_filename": "adapted_friction.json"
     },
+    "dynamics_model": {
+        "export_npz": false,
+        "include_coriolis_matrix": false,
+        "include_friction_torque": true,
+        "evaluation_points": "trajectory",
+        "simplify": "trigsimp"
+    },
 
     "advanced": {
         "observation_matrix_cache": {
