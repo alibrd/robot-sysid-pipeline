@@ -136,7 +136,7 @@ def export_adapted_urdf(
 
     # 1. Overwrite per-link inertials.
     inertials = _unpack_link_inertials(pi_rigid, n_dof)
-    name_to_link = {l.get("name"): l for l in root.findall("link")}
+    name_to_link = {link.get("name"): link for link in root.findall("link")}
     for link_name, blk in zip(revolute_child_links, inertials):
         if link_name not in name_to_link:
             raise ValueError(
@@ -150,14 +150,14 @@ def export_adapted_urdf(
         origin_el.set("rpy", "0 0 0")
         mass_el = _set_or_create(inertial_el, "mass")
         mass_el.set("value", f"{blk['mass']:.9g}")
-        I = blk["inertia_at_com"]
+        inertia = blk["inertia_at_com"]
         inertia_el = _set_or_create(inertial_el, "inertia")
-        inertia_el.set("ixx", f"{I[0, 0]:.9g}")
-        inertia_el.set("ixy", f"{I[0, 1]:.9g}")
-        inertia_el.set("ixz", f"{I[0, 2]:.9g}")
-        inertia_el.set("iyy", f"{I[1, 1]:.9g}")
-        inertia_el.set("iyz", f"{I[1, 2]:.9g}")
-        inertia_el.set("izz", f"{I[2, 2]:.9g}")
+        inertia_el.set("ixx", f"{inertia[0, 0]:.9g}")
+        inertia_el.set("ixy", f"{inertia[0, 1]:.9g}")
+        inertia_el.set("ixz", f"{inertia[0, 2]:.9g}")
+        inertia_el.set("iyy", f"{inertia[1, 1]:.9g}")
+        inertia_el.set("iyz", f"{inertia[1, 2]:.9g}")
+        inertia_el.set("izz", f"{inertia[2, 2]:.9g}")
 
     # 2. Overwrite per-joint <dynamics> tags from the friction parameters.
     friction_per_joint = _split_friction(theta_f, n_dof, friction_model)

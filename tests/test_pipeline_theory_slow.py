@@ -27,7 +27,7 @@ def test_slow_ne_el_regressors_match_across_random_default_states(tmp_path):
     pi = kin.PI.flatten()
     rng = np.random.default_rng(42)
 
-    print(f"\nSTAGE 4 & 5 (slow): NE/EL torque agreement across 10 random states (2-DoF RRBot)")
+    print("\nSTAGE 4 & 5 (slow): NE/EL torque agreement across 10 random states (2-DoF RRBot)")
     for i in range(10):
         q = rng.uniform(-1.0, 1.0, kin.nDoF)
         dq = rng.uniform(-2.0, 2.0, kin.nDoF)
@@ -51,7 +51,7 @@ def test_slow_base_parameter_reduction_preserves_multiple_random_default_observa
     pi = kin.PI.flatten()
     rng = np.random.default_rng(123)
 
-    print(f"\nSTAGE 9 (slow): Base-parameter reduction across 3 random observation matrices (2-DoF RRBot)")
+    print("\nSTAGE 9 (slow): Base-parameter reduction across 3 random observation matrices (2-DoF RRBot)")
     for trial in range(3):
         rows = []
         for _ in range(60):
@@ -92,7 +92,8 @@ def test_slow_condition_cost_matches_manual_base_matrix():
         "cosine",
         False,
     )
-    get_reg = lambda qv, dqv, ddqv: newton_euler_regressor(kin, qv, dqv, ddqv)
+    def get_reg(qv, dqv, ddqv):
+        return newton_euler_regressor(kin, qv, dqv, ddqv)
 
     cost = _condition_cost_base(q, dq, ddq, t, get_reg)
 
@@ -119,7 +120,7 @@ def test_slow_fingeredu_3dof_fixture_remains_supported():
     from src.urdf_parser import parse_urdf
 
     robot = parse_urdf(URDF_FINGEREDU)
-    print(f"\nSTAGE 1 (slow): FingerEdu_3DoF fixture support")
+    print("\nSTAGE 1 (slow): FingerEdu_3DoF fixture support")
     print(f"  nDoF = {robot.nDoF}")
     assert robot.nDoF == 3
     print("  VERIFIED: FingerEdu_3DoF xacro parses correctly")

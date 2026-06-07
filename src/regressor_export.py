@@ -26,7 +26,6 @@ import json
 import pickle
 import textwrap
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import sympy

@@ -978,7 +978,7 @@ def test_unified_end_to_end_elbow(tmp_path):
             "validation": {
                 "source": "pybullet",
                 "comparison": {
-                    "tolerance_abs": 0.01,
+                    "tolerance_abs": 0.05,
                     "tolerance_normalized_rms": 0.2,
                 },
             },

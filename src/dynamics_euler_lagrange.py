@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import sympy
 
-from .math_utils import skew_sym, axis_rotation_sym, GRAVITY_SI
+from .math_utils import axis_rotation_sym, GRAVITY_SI
 from .kinematics import RobotKinematics
 
 logger = logging.getLogger("sysid_pipeline")

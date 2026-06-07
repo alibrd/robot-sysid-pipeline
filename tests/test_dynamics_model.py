@@ -15,11 +15,9 @@ exercises the 3-DOF ``ElbowManipulator_3DoF.urdf`` to confirm the mode
 import importlib.util
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -61,7 +59,6 @@ def _load_emitted(path):
 
 
 def _make_pi_aug(model, *, seed=0, friction_scale=0.1):
-    n = model.nDoF
     rng = np.random.default_rng(seed)
     pi_rigid = model.kin.PI.flatten().copy()
     n_fric = model.n_friction_params
@@ -162,9 +159,6 @@ def test_dynamics_identity_with_friction_viscous_coulomb(tmp_path):
 
 def test_friction_torque_signature_and_invariance(tmp_path):
     from src.dynamics_model import friction_torque
-    model = _build_model(URDF_RRBOT, friction_model="viscous",
-                         cache_dir=tmp_path)
-    n = model.nDoF
     pi_friction = np.array([0.3, 0.5])
     dq = np.array([0.7, -0.4])
     tau_f = friction_torque(dq, pi_friction, "viscous")
@@ -317,7 +311,6 @@ def test_emitted_matches_regressor_tau(tmp_path):
     model = _build_model(URDF_RRBOT, friction_model="viscous_coulomb",
                          cache_dir=tmp_path)
     pi = _make_pi_aug(model, seed=6)
-    n_rigid = 10 * model.nDoF
     path = _emit_for(model, pi, tmp_path)
     mod = _load_emitted(path)
     for seed in range(20):
@@ -361,8 +354,10 @@ def test_emitted_mode1_vs_mode2_have_different_baked_pi(tmp_path):
     pi_identified = pi_nominal + 0.05 * rng.standard_normal(n_aug)
     pi_identified[n_rigid:] = np.abs(pi_identified[n_rigid:])  # keep physical
 
-    out1 = tmp_path / "mode1"; out1.mkdir()
-    out2 = tmp_path / "mode2"; out2.mkdir()
+    out1 = tmp_path / "mode1"
+    out1.mkdir()
+    out2 = tmp_path / "mode2"
+    out2.mkdir()
     from src.regressor_export import export_dynamics_model_closed_form
     p1 = export_dynamics_model_closed_form(model, pi_nominal, out1)
     p2 = export_dynamics_model_closed_form(model, pi_identified, out2)

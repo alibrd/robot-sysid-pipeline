@@ -218,7 +218,8 @@ def test_stage_3_to_5_torque_evaluator_matches_direct_regressor_for_ne_and_el(tm
 
     kin = RobotKinematics(parse_urdf(URDF_RRBOT))
     if method == "newton_euler":
-        base_reg = lambda q, dq, ddq: newton_euler_regressor(kin, q, dq, ddq)
+        def base_reg(q, dq, ddq):
+            return newton_euler_regressor(kin, q, dq, ddq)
         rigid = kin.PI.flatten()
     else:
         reg_el, kept = euler_lagrange_regressor_builder(kin, str(tmp_path / "el_cache"))
@@ -283,7 +284,9 @@ def test_stage_8_observation_matrix_is_unchanged_by_torque_config():
     dq = rng.uniform(-0.4, 0.4, size=(12, kin.nDoF))
     ddq = rng.uniform(-0.5, 0.5, size=(12, kin.nDoF))
     tau = rng.uniform(-1.0, 1.0, size=(12, kin.nDoF))
-    reg = lambda qv, dqv, ddqv: newton_euler_regressor(kin, qv, dqv, ddqv)
+
+    def reg(qv, dqv, ddqv):
+        return newton_euler_regressor(kin, qv, dqv, ddqv)
     cfg_plain = {
         "friction": {"model": "none"},
         "filtering": {"enabled": False},

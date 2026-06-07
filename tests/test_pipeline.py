@@ -251,7 +251,8 @@ class TestTrajectoryBoundary:
                 "trajectory_duration_periods": 1.5,
             },
         }
-        import tempfile, os
+        import tempfile
+        import os
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json",
                                          delete=False) as f:
             json.dump(cfg_data, f)
@@ -273,7 +274,8 @@ class TestTrajectoryBoundary:
                 "trajectory_duration_periods": 2,
             },
         }
-        import tempfile, os
+        import tempfile
+        import os
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json",
                                          delete=False) as f:
             json.dump(cfg_data, f)
@@ -287,7 +289,8 @@ class TestTrajectoryBoundary:
     def test_el_with_constrained_identification_is_accepted(self):
         """EL uses a full-column wrapper, so constrained modes are config-valid."""
         from src.config_loader import load_config
-        import tempfile, os
+        import tempfile
+        import os
         for feas in ("lmi", "cholesky"):
             cfg_data = {
                 "urdf_path": URDF_PENDULUM,
@@ -308,7 +311,9 @@ class TestTrajectoryBoundary:
     def test_cholesky_accepted_as_distinct_method(self):
         """Config validation accepts 'cholesky' as a distinct feasibility method."""
         from src.config_loader import load_config
-        import tempfile, os, warnings
+        import tempfile
+        import os
+        import warnings
         cfg_data = {
             "urdf_path": URDF_PENDULUM,
             "output_dir": "dummy",
@@ -564,8 +569,8 @@ class TestFeasibility:
 
     def test_cholesky_solver_guarantees_psd(self):
         """Parameters produced by the Cholesky solver path must have J ≽ 0."""
-        from src.solver import _solve_cholesky, _cholesky_vec_to_lower, _lower_to_cholesky_vec
-        from src.feasibility import pseudo_inertia_matrix, is_pseudo_inertia_psd
+        from src.solver import _solve_cholesky
+        from src.feasibility import is_pseudo_inertia_psd
         nDoF = 1
         # Construct a small synthetic problem
         rng = np.random.default_rng(42)
@@ -697,7 +702,6 @@ class TestPipelineSmoke:
         results = np.load(str(tmp_path / "out" / "identification_results.npz"),
                           allow_pickle=True)
         assert float(results["residual"]) < 1.0
-        pi = results["pi_identified"]
         # The identified model or its correction must pass pseudo-inertia PSD
         pi_corrected = results["pi_corrected"]
         if len(pi_corrected) >= 10:

@@ -5,7 +5,7 @@ import sympy
 
 from .math_utils import (
     rpy_to_rotation_np, axis_rotation_sym, axis_torque_row,
-    make_transform_np, skew_np,
+    skew_np,
 )
 from .urdf_parser import RobotDescription
 

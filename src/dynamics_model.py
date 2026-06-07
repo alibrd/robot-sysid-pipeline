@@ -67,8 +67,10 @@ def coriolis_matrix_christoffel(rigid_fn, pi_rigid, q, dq, *, fd_step=1e-6):
     n = q.size
     dM = np.zeros((n, n, n))
     for k in range(n):
-        qp = q.copy(); qp[k] += fd_step
-        qm = q.copy(); qm[k] -= fd_step
+        qp = q.copy()
+        qp[k] += fd_step
+        qm = q.copy()
+        qm[k] -= fd_step
         dM[k] = (mass_matrix(rigid_fn, pi_rigid, qp)
                  - mass_matrix(rigid_fn, pi_rigid, qm)) / (2.0 * fd_step)
     # Gamma[i,j,k] = 0.5 * (dM[k][i,j] + dM[j][i,k] - dM[i][j,k])

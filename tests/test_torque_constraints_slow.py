@@ -1,7 +1,7 @@
 """Slower comparison tests for the torque-limited excitation methods."""
-import json
 import sys
 from pathlib import Path
+from tests.test_torque_constraints import _run_pipeline, _write_torque_config, URDF_FINGEREDU
 
 import numpy as np
 import pytest
@@ -9,7 +9,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tests.test_torque_constraints import _run_pipeline, _write_torque_config, URDF_FINGEREDU
 
 
 @pytest.mark.slow

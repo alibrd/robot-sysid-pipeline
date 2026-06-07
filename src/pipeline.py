@@ -1,6 +1,5 @@
 """Main pipeline orchestrator: loads config, runs all stages, writes output."""
 import json
-import logging
 import time
 import traceback
 from copy import deepcopy

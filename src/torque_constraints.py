@@ -1,5 +1,4 @@
 """Shared helpers for torque-limited excitation design and replay validation."""
-import math
 from statistics import NormalDist
 
 import numpy as np

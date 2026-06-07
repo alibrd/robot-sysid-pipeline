@@ -87,7 +87,7 @@ def test_stage_1_and_3_parser_and_kinematics_build_standalone_model():
     assert robot.revolute_joint_names == ["single_rrbot_joint1", "single_rrbot_joint2"]
     assert kin.PI.shape == (20, 1)
     np.testing.assert_allclose(actual, expected, atol=1e-12)
-    print(f"  VERIFIED: URDF parsed correctly, PI vector matches expected values (atol=1e-12)")
+    print("  VERIFIED: URDF parsed correctly, PI vector matches expected values (atol=1e-12)")
 
 
 def test_stage_2_joint_limit_extraction_rejects_missing_json_overrides():
@@ -118,7 +118,7 @@ def test_stage_4_and_5_newton_euler_and_euler_lagrange_match_shared_torques(tmp_
     pi = kin.PI.flatten()
     rng = np.random.default_rng(7)
 
-    print(f"\nSTAGE 4 & 5: NE and EL regressors must produce identical torques (2-DoF RRBot)")
+    print("\nSTAGE 4 & 5: NE and EL regressors must produce identical torques (2-DoF RRBot)")
     for i in range(3):
         q = rng.uniform(-0.5, 0.5, kin.nDoF)
         dq = rng.uniform(-1.0, 1.0, kin.nDoF)
@@ -418,7 +418,8 @@ def test_stage_9_base_parameter_reduction_preserves_observation_equation_for_ne_
     rng = np.random.default_rng(11)
 
     if method == "newton_euler":
-        regressor_fn = lambda qv, dqv, ddqv: newton_euler_regressor(kin, qv, dqv, ddqv)
+        def regressor_fn(qv, dqv, ddqv):
+            return newton_euler_regressor(kin, qv, dqv, ddqv)
         pi = kin.PI.flatten()
     else:
         regressor_fn, kept = euler_lagrange_regressor_builder(kin, str(tmp_path / "el_cache"))
@@ -653,7 +654,8 @@ def test_stage_7_synthetic_tau_equals_regressor_times_pi(tmp_path):
         "filtering": {"enabled": False},
         "downsampling": {"frequency_hz": 0},
     }
-    reg_fn = lambda qv, dqv, ddqv: newton_euler_regressor(kin, qv, dqv, ddqv)
+    def reg_fn(qv, dqv, ddqv):
+        return newton_euler_regressor(kin, qv, dqv, ddqv)
     W, tau_vec = build_observation_matrix(
         q_t.T, dq_t.T, ddq_t.T, tau_indep, reg_fn, obs_cfg, data_fs,
     )
@@ -665,7 +667,7 @@ def test_stage_7_synthetic_tau_equals_regressor_times_pi(tmp_path):
     _, _, _, _, pi_b_true = compute_base_parameters(W, pi)
     param_err = np.max(np.abs(pi_base_pipeline - pi_b_true))
 
-    print(f"\nSTAGE 7: Synthetic data must satisfy tau_k = Y_k @ pi")
+    print("\nSTAGE 7: Synthetic data must satisfy tau_k = Y_k @ pi")
     print(f"  nDoF = {kin.nDoF}, n_samples = {N}, PI length = {len(pi)}")
     print(f"  max|tau_vec - W @ pi|           = {obs_err:.2e}")
     print(f"  max|pi_base_pipeline - pi_true| = {param_err:.2e}")

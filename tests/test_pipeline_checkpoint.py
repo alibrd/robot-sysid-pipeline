@@ -1,5 +1,4 @@
 """Tests for pipeline partitioning: excitation_only / checkpoint_dir modes."""
-import json
 import sys
 from pathlib import Path
 
