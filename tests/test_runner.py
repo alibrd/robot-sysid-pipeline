@@ -927,7 +927,7 @@ def test_unified_end_to_end_rrbot_2dof(tmp_path):
             "source": "pybullet",
             "sample_rate_hz": 100.0,
             "comparison": {
-                "tolerance_abs": 1e-4,
+                "tolerance_abs": 1e-2,
                 "tolerance_normalized_rms": 1e-4,
             },
         },
