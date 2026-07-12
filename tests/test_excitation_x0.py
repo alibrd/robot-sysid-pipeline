@@ -203,3 +203,26 @@ def test_pipeline_passes_excitation_config_to_stage_5(tmp_path, monkeypatch):
     assert captured["cfg_exc"]["optimize_phase"] is False
     assert captured["cfg_exc"]["trajectory_duration_periods"] == 24
     assert captured["regressor_fn"] is not None
+
+
+def test_cost_time_grid_density_guarantees():
+    """The cost grid is >=4 samples/period of the top harmonic below the
+    cap, and STRICTLY above its Nyquist rate for any configuration."""
+    from src.excitation import _COST_GRID_MAX, _cost_time_grid
+
+    f0 = 0.2
+    for m, n_periods in [(3, 1), (5, 1), (10, 3), (20, 3), (30, 4)]:
+        tf = n_periods / f0
+        t = _cost_time_grid(m, n_periods, tf)
+        dt = t[1] - t[0]
+        top_period = 1.0 / (m * f0)
+        samples_per_period = top_period / dt
+        assert samples_per_period > 2.0, (
+            f"(m={m}, n={n_periods}): {samples_per_period:.3f} samples per "
+            "top-harmonic period is at/below Nyquist"
+        )
+        if 4 * m * n_periods + 1 <= _COST_GRID_MAX:
+            assert samples_per_period >= 4.0 - 1e-9, (
+                f"(m={m}, n={n_periods}): expected >=4 samples/period below "
+                f"the cap, got {samples_per_period:.3f}"
+            )

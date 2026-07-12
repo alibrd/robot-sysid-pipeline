@@ -97,9 +97,11 @@ def test_slow_condition_cost_matches_manual_base_matrix():
 
     cost = _condition_cost_base(q, dq, ddq, t, get_reg)
 
-    step = max(1, t.size // 50)
-    indices = list(range(0, t.size, step))
-    W = np.vstack([get_reg(q[:, idx], dq[:, idx], ddq[:, idx]) for idx in indices])
+    # _condition_cost_base evaluates EVERY provided sample; the caller
+    # (_cost_time_grid) owns the grid density.
+    W = np.vstack([
+        get_reg(q[:, idx], dq[:, idx], ddq[:, idx]) for idx in range(t.size)
+    ])
     W_base, _, _, _, _ = compute_base_parameters(W, np.ones(W.shape[1]), tol=1e-8)
     sv = np.linalg.svd(W_base, compute_uv=False)
     sv_pos = sv[sv > 1e-12]

@@ -75,8 +75,12 @@ def coriolis_matrix_christoffel(rigid_fn, pi_rigid, q, dq, *, fd_step=1e-6):
                  - mass_matrix(rigid_fn, pi_rigid, qm)) / (2.0 * fd_step)
     # Gamma[i,j,k] = 0.5 * (dM[k][i,j] + dM[j][i,k] - dM[i][j,k])
     # dM has axes (k, i, j) → permute to assemble Christoffels.
+    # The middle term must be dM[j][i,k] (axes (1,0,2)); using any other
+    # permutation still reproduces c = C @ dq (the error symmetrises out
+    # over the j,k contraction) but destroys the dM/dt - 2C skew-symmetry
+    # property of the Christoffel form.
     Gamma = 0.5 * (dM.transpose(1, 2, 0)
-                   + dM.transpose(2, 1, 0)
+                   + dM.transpose(1, 0, 2)
                    - dM.transpose(0, 2, 1))
     return Gamma @ dq
 

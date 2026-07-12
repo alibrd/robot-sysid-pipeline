@@ -128,6 +128,38 @@ def test_coriolis_matrix_christoffel_product_runtime(tmp_path):
         np.testing.assert_allclose(C_mat @ dq, c, atol=1e-7)
 
 
+def test_coriolis_matrix_christoffel_skew_symmetry(tmp_path):
+    """dM/dt - 2C must be skew-symmetric for the true Christoffel C.
+
+    Regression test: a wrong axis permutation in the Christoffel assembly
+    still satisfies c = C @ dq (the error symmetrises out over the j,k
+    contraction) but breaks this passivity property.
+    """
+    from src.dynamics_model import coriolis_matrix_christoffel, mass_matrix
+    model = _build_model(URDF_RRBOT, cache_dir=tmp_path)
+    pi_rigid = model.kin.PI.flatten()
+    n = model.nDoF
+    h = 1e-6
+    for seed in range(3):
+        q, dq, _ = _random_state(n, seed)
+        C_mat = coriolis_matrix_christoffel(model.rigid, pi_rigid, q, dq)
+        M_dot = np.zeros((n, n))
+        for k in range(n):
+            qp = q.copy()
+            qp[k] += h
+            qm = q.copy()
+            qm[k] -= h
+            M_dot += dq[k] * (
+                mass_matrix(model.rigid, pi_rigid, qp)
+                - mass_matrix(model.rigid, pi_rigid, qm)
+            ) / (2.0 * h)
+        N = M_dot - 2.0 * C_mat
+        skew_err = np.max(np.abs(N + N.T))
+        assert skew_err < 1e-6, (
+            f"dM/dt - 2C not skew-symmetric (err={skew_err:.3e}) at seed {seed}"
+        )
+
+
 def test_dynamics_identity_no_friction(tmp_path):
     from src.dynamics_model import verify_dynamics_consistency
     model = _build_model(URDF_RRBOT, cache_dir=tmp_path)
@@ -335,6 +367,27 @@ def test_emitted_M_symmetric(tmp_path):
         q, _, _ = _random_state(model.nDoF, seed)
         M = mod.M(q)
         assert np.max(np.abs(M - M.T)) < 1e-10
+
+
+def test_coriolis_matrix_runtime_matches_emitted(tmp_path):
+    """Runtime Christoffel C agrees with the emitted closed-form C.
+
+    Regression test: the emitted C is derived symbolically from the correct
+    Christoffel formula; the runtime finite-difference C must match it.
+    """
+    from src.dynamics_model import coriolis_matrix_christoffel
+    model = _build_model(URDF_RRBOT, cache_dir=tmp_path)
+    pi = _make_pi_aug(model, seed=9)
+    pi_rigid = pi[:10 * model.nDoF]
+    path = _emit_for(model, pi, tmp_path, include_coriolis_matrix=True)
+    mod = _load_emitted(path)
+    for seed in range(3):
+        q, dq, _ = _random_state(model.nDoF, seed)
+        C_rt = coriolis_matrix_christoffel(model.rigid, pi_rigid, q, dq)
+        np.testing.assert_allclose(
+            mod.C(q, dq), C_rt, atol=1e-6,
+            err_msg=f"runtime vs emitted C mismatch at seed {seed}",
+        )
 
 
 def test_emitted_mode1_vs_mode2_have_different_baked_pi(tmp_path):

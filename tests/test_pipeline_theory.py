@@ -535,8 +535,19 @@ def test_stage_11_euler_lagrange_accepts_constrained_feasibility_modes(tmp_path)
     print("  VERIFIED: euler_lagrange + feasibility_method='lmi' is accepted at config load")
 
 
-def test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstrained_run(tmp_path):
+def test_stage_12_unconstrained_run_recovers_feasible_nominal(tmp_path):
+    """Noise-free unconstrained identification must recover the URDF nominal.
+
+    The full-parameter reconstruction anchors unidentifiable directions to
+    the URDF nominal, so a synthetic (noise-free) run on a physically
+    consistent robot yields pi_identified == pi_nominal and a passing
+    per-link feasibility check. (Before the anchoring fix, the bare
+    min-norm pinv reconstruction produced non-physical per-link values and
+    feasible=False even for perfect data.)
+    """
+    from src.kinematics import RobotKinematics
     from src.pipeline import SystemIdentificationPipeline
+    from src.urdf_parser import parse_urdf
 
     cfg_path = _write_config(
         tmp_path,
@@ -548,14 +559,19 @@ def test_stage_12_pipeline_success_and_feasibility_are_distinct_for_unconstraine
     results = np.load(tmp_path / "out" / "identification_results.npz", allow_pickle=True)
     log_text = (tmp_path / "out" / "pipeline.log").read_text(encoding="utf-8")
 
-    print("\nSTAGE 12: Pipeline success and physical feasibility are distinct")
+    pi_nominal = RobotKinematics(parse_urdf(URDF_DEFAULT)).PI.flatten()
+    pi_identified = results["pi_identified"][:pi_nominal.size]
+
+    print("\nSTAGE 12: Unconstrained noise-free run recovers the nominal model")
     print(f"  feasible flag         = {bool(results['feasible'])}")
     completed = "PIPELINE COMPLETED SUCCESSFULLY" in log_text
     print(f"  pipeline completed    = {completed}")
+    print(f"  max |pi_id - pi_nom|  = {np.max(np.abs(pi_identified - pi_nominal)):.3e}")
 
-    assert not bool(results["feasible"])
     assert completed
-    print("  VERIFIED: Pipeline completed successfully but feasible=False (unconstrained run)")
+    assert bool(results["feasible"])
+    np.testing.assert_allclose(pi_identified, pi_nominal, atol=1e-6)
+    print("  VERIFIED: pi_identified == URDF nominal and feasible=True")
 
 
 def test_stage_12_constrained_lmi_returns_feasible_newton_euler_model(tmp_path):
@@ -782,3 +798,62 @@ def test_stage_12_cholesky_constrained_produces_feasible_model(tmp_path):
     assert all_psd, "All link pseudo-inertia matrices must be PSD"
     assert float(results["residual"]) < 1.0
     print("  VERIFIED: Cholesky-constrained pipeline produces feasible pseudo-inertia for all links")
+
+
+def test_stage_11_friction_clamp_reports_torque_prediction_delta(tmp_path):
+    """When post-identification correction changes parameters (here: a
+    genuinely negative identified viscous coefficient is clamped to 0),
+    the pipeline must warn with the torque-prediction delta so the user
+    knows the corrected model no longer minimises the residual."""
+    from src.pipeline import SystemIdentificationPipeline
+    from src.regressor_model import RegressorModel
+
+    # Craft measurements whose viscous friction is NEGATIVE (-0.1 Nm.s/rad)
+    # so the identified Fv is negative and the clamp fires.
+    model = RegressorModel.from_urdf(URDF_RRBOT, friction_model="viscous")
+    pi_neg = np.concatenate([
+        model.kin.PI.flatten(), [-0.1, -0.1],
+    ])
+    rng = np.random.default_rng(11)
+    n_samples = 200
+    q = rng.uniform(-1.0, 1.0, (n_samples, 2))
+    dq = rng.uniform(-2.0, 2.0, (n_samples, 2))
+    ddq = rng.uniform(-4.0, 4.0, (n_samples, 2))
+    tau = np.vstack([
+        model.augmented(q[k], dq[k], ddq[k]) @ pi_neg
+        for k in range(n_samples)
+    ])
+    data_file = tmp_path / "neg_friction.npz"
+    np.savez(str(data_file), q=q, dq=dq, ddq=ddq, tau=tau, fs=100.0)
+
+    cfg = {
+        "urdf_path": URDF_RRBOT,
+        "output_dir": str(tmp_path / "out"),
+        "method": "newton_euler",
+        "friction": {"model": "viscous"},
+        "identification": {
+            "solver": "ols",
+            "feasibility_method": "none",
+            "data_file": str(data_file),
+        },
+        "joint_limits": {
+            "position": [[-1, 1]] * 2,
+            "velocity": [[-2, 2]] * 2,
+            "acceleration": [[-5, 5]] * 2,
+        },
+        "excitation": {
+            "basis_functions": "cosine",
+            "num_harmonics": 1,
+            "base_frequency_hz": 0.2,
+            "optimize_condition_number": False,
+            "optimizer_max_iter": 1,
+            "trajectory_duration_periods": 1,
+        },
+    }
+    SystemIdentificationPipeline(cfg).run()
+    log_text = (tmp_path / "out" / "pipeline.log").read_text(encoding="utf-8")
+
+    print("\nSTAGE 11: Friction clamp must report the torque-prediction delta")
+    assert "clamping to 0.0" in log_text
+    assert "torque-prediction delta" in log_text
+    print("  VERIFIED: clamp warning and torque-prediction delta logged")

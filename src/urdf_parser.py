@@ -262,11 +262,15 @@ def extract_torque_limits(robot: RobotDescription,
                           cfg_limits: dict,
                           logger,
                           required: bool = False):
-    """Extract torque limits from URDF effort values or JSON fallback.
+    """Extract torque limits from the JSON config or URDF effort values.
 
-    Precedence per joint:
-    1. URDF/XACRO effort limit, if present
-    2. JSON config under joint_limits.torque
+    Precedence per joint (matching position/velocity limits, so the config
+    can always TIGHTEN the URDF's rated effort for conservative excitation):
+    1. JSON config under joint_limits.torque, intersected with the URDF
+       effort envelope when one exists -- the rated effort is a physical
+       limit, so a config interval can never WIDEN beyond it. Widening
+       attempts are clamped with a warning (source ``json_torque_clamped``).
+    2. URDF/XACRO effort limit, if present
     3. Hard failure when *required* is True
     """
     n = robot.nDoF
@@ -276,15 +280,31 @@ def extract_torque_limits(robot: RobotDescription,
 
     for i, jname in enumerate(robot.revolute_joint_names):
         jd = next(j for j in robot.joints if j.name == jname)
+        if cfg_tau is not None and i < len(cfg_tau):
+            lo, hi = float(cfg_tau[i][0]), float(cfg_tau[i][1])
+            if jd.limit_effort is not None:
+                effort = abs(float(jd.limit_effort))
+                lo_c = max(lo, -effort)
+                hi_c = min(hi, effort)
+                if lo_c != lo or hi_c != hi:
+                    logger.warning(
+                        "joint_limits.torque[%d]=[%g, %g] for joint '%s' "
+                        "exceeds the URDF rated effort %g; clamping to "
+                        "[%g, %g].", i, lo, hi, jname, effort, lo_c, hi_c,
+                    )
+                    sources.append("json_torque_clamped")
+                else:
+                    sources.append("json_torque")
+                tau_lim[i] = [lo_c, hi_c]
+            else:
+                tau_lim[i] = [lo, hi]
+                sources.append("json_torque")
+            continue
+
         if jd.limit_effort is not None:
             effort = abs(float(jd.limit_effort))
             tau_lim[i] = [-effort, effort]
             sources.append("urdf_effort")
-            continue
-
-        if cfg_tau is not None and i < len(cfg_tau):
-            tau_lim[i] = cfg_tau[i]
-            sources.append("json_torque")
             continue
 
         if required:

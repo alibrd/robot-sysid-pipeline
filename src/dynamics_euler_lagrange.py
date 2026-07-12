@@ -20,6 +20,71 @@ from .kinematics import RobotKinematics
 logger = logging.getLogger("sysid_pipeline")
 
 
+def _kinematics_fingerprint(kin: RobotKinematics) -> str:
+    """Hash of everything the symbolic regressor structurally depends on.
+
+    The cached ``Y_sym`` is a function of the kinematic structure only
+    (base transform, joint origins/axes, offsets) -- NOT of the inertial
+    values. If the URDF geometry changes while the cache directory stays
+    the same, the cached regressor would be silently wrong without this
+    check.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(np.int64(kin.nDoF).tobytes())
+    h.update(np.ascontiguousarray(kin.Tw_0, dtype=float).tobytes())
+    for i in range(kin.nDoF):
+        h.update(np.ascontiguousarray(kin.di_raw[i], dtype=float).tobytes())
+        h.update(np.ascontiguousarray(kin.pi_i_raw[i], dtype=float).tobytes())
+        row, sign = kin.torque_row_sign[i]
+        h.update(np.array([row, sign], dtype=float).tobytes())
+        T0 = np.asarray(kin.link_kin[i].Ti_1_i(0.0), dtype=float).reshape(4, 4)
+        h.update(np.ascontiguousarray(T0).tobytes())
+    return h.hexdigest()
+
+
+def load_or_build_symbolic_regressor(kin: RobotKinematics, cache_dir: str):
+    """Return ``(Y_sym, kept_cols)``, rebuilding when the cache is stale.
+
+    The cache carries a fingerprint of the kinematic structure; a mismatch
+    (e.g. the URDF geometry was edited while reusing the same cache
+    directory) triggers a rebuild instead of silently reusing a wrong
+    regressor.
+    """
+    n = kin.nDoF
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    pkl = cache_path / "el_regressor_cache.pkl"
+    fingerprint = _kinematics_fingerprint(kin)
+
+    if pkl.exists():
+        with open(pkl, "rb") as f:
+            data = pickle.load(f)
+        if data.get("kin_fingerprint") == fingerprint:
+            logger.info("Loading cached EL regressor from %s", pkl)
+            return data["Y_sym"], data["kept_cols"]
+        logger.warning(
+            "EL regressor cache %s does not match the current kinematic "
+            "structure (URDF geometry changed, or cache written by an older "
+            "version); rebuilding.", pkl,
+        )
+
+    q_syms = [sympy.Symbol(f"q{i+1}") for i in range(n)]
+    dq_syms = [sympy.Symbol(f"dq{i+1}") for i in range(n)]
+    ddq_syms = [sympy.Symbol(f"ddq{i+1}") for i in range(n)]
+    logger.info("Building symbolic EL regressor for %d DoF ...", n)
+    Y_sym, kept_cols = _build_symbolic_regressor(kin, q_syms, dq_syms, ddq_syms)
+    with open(pkl, "wb") as f:
+        pickle.dump({
+            "Y_sym": Y_sym,
+            "kept_cols": kept_cols,
+            "kin_fingerprint": fingerprint,
+        }, f)
+    logger.info("Cached EL regressor to %s", pkl)
+    return Y_sym, kept_cols
+
+
 def euler_lagrange_regressor_builder(kin: RobotKinematics, cache_dir: str):
     """Build (or load cached) symbolic EL regressor.
 
@@ -29,27 +94,13 @@ def euler_lagrange_regressor_builder(kin: RobotKinematics, cache_dir: str):
     kept_cols : list of column indices retained from the full 10*nDoF vector
     """
     n = kin.nDoF
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
-    pkl = cache_path / "el_regressor_cache.pkl"
 
     q_syms = [sympy.Symbol(f"q{i+1}") for i in range(n)]
     dq_syms = [sympy.Symbol(f"dq{i+1}") for i in range(n)]
     ddq_syms = [sympy.Symbol(f"ddq{i+1}") for i in range(n)]
     all_syms = q_syms + dq_syms + ddq_syms
 
-    if pkl.exists():
-        logger.info("Loading cached EL regressor from %s", pkl)
-        with open(pkl, "rb") as f:
-            data = pickle.load(f)
-        Y_sym = data["Y_sym"]
-        kept_cols = data["kept_cols"]
-    else:
-        logger.info("Building symbolic EL regressor for %d DoF ...", n)
-        Y_sym, kept_cols = _build_symbolic_regressor(kin, q_syms, dq_syms, ddq_syms)
-        with open(pkl, "wb") as f:
-            pickle.dump({"Y_sym": Y_sym, "kept_cols": kept_cols}, f)
-        logger.info("Cached EL regressor to %s", pkl)
+    Y_sym, kept_cols = load_or_build_symbolic_regressor(kin, cache_dir)
 
     logger.info("EL regressor: %d x %d (kept %d of %d columns)",
                 Y_sym.shape[0], Y_sym.shape[1], len(kept_cols), 10 * n)

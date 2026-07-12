@@ -179,6 +179,117 @@ class TestFromCheckpoint:
             pipeline.run()
 
 
+class TestCheckpointCompatibility:
+    """The resume validator must reject configs incompatible with the
+    checkpoint -- including an in-place edit of the SAME URDF file, which
+    only a digest captured at save time can detect."""
+
+    def _checkpoint_with_local_urdf(self, tmp_path):
+        """Phase-1 run against a tmp COPY of the URDF (so it can be edited)."""
+        from src.pipeline import SystemIdentificationPipeline
+
+        urdf_copy = tmp_path / "robot.urdf"
+        urdf_copy.write_bytes(Path(URDF_RRBOT).read_bytes())
+        cfg = _make_config(tmp_path, "exc_out")
+        cfg["urdf_path"] = str(urdf_copy)
+        cfg["excitation_only"] = True
+        p1 = SystemIdentificationPipeline(cfg)
+        p1.run()
+        return urdf_copy, p1
+
+    def test_checkpoint_stores_urdf_digest(self, tmp_path):
+        import hashlib
+        import json as _json
+
+        urdf_copy, p1 = self._checkpoint_with_local_urdf(tmp_path)
+        cp_cfg = _json.loads(
+            (p1.output_dir / "checkpoint_config.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+        expected = hashlib.sha256(urdf_copy.read_bytes()).hexdigest()
+        assert cp_cfg["urdf_sha256"] == expected
+
+    def test_in_place_urdf_edit_rejected(self, tmp_path):
+        """Editing the SAME URDF file after checkpointing must be caught."""
+        from src.pipeline import SystemIdentificationPipeline
+
+        urdf_copy, p1 = self._checkpoint_with_local_urdf(tmp_path)
+
+        # In-place edit: change a mass value in the very file both configs
+        # reference. Hashing both paths at resume time would NOT catch this.
+        text = urdf_copy.read_text(encoding="utf-8")
+        assert '<mass value="1"/>' in text
+        urdf_copy.write_text(
+            text.replace('<mass value="1"/>', '<mass value="2"/>', 1),
+            encoding="utf-8",
+        )
+
+        cfg2 = _make_config(tmp_path, "resume_out")
+        cfg2["urdf_path"] = str(urdf_copy)
+        cfg2["checkpoint_dir"] = str(p1.output_dir)
+        with pytest.raises(ValueError, match="checkpoint-time digest"):
+            SystemIdentificationPipeline(cfg2).run()
+
+    def test_missing_checkpoint_config_proceeds(self, tmp_path):
+        """Legacy checkpoints without checkpoint_config.json still resume."""
+        from src.pipeline import SystemIdentificationPipeline
+
+        cfg1 = _make_config(tmp_path, "exc_out")
+        cfg1["excitation_only"] = True
+        p1 = SystemIdentificationPipeline(cfg1)
+        p1.run()
+        (p1.output_dir / "checkpoint_config.json").unlink()
+
+        cfg2 = _make_config(tmp_path, "resume_out")
+        cfg2["checkpoint_dir"] = str(p1.output_dir)
+        p2 = SystemIdentificationPipeline(cfg2)
+        p2.run()
+        assert (p2.output_dir / "identification_results.npz").exists()
+
+    @pytest.mark.parametrize("mutate, match", [
+        (lambda cfg: cfg["friction"].update(model="viscous"), "friction.model"),
+        (lambda cfg: cfg.update(method="euler_lagrange"), "method"),
+        (lambda cfg: cfg["excitation"].update(optimize_phase=True),
+         "optimize_phase"),
+        (lambda cfg: cfg["excitation"].update(num_harmonics=2),
+         "num_harmonics"),
+    ])
+    def test_config_mismatches_rejected(self, tmp_path, mutate, match):
+        from src.pipeline import SystemIdentificationPipeline
+
+        cfg1 = _make_config(tmp_path, "exc_out")
+        cfg1["excitation_only"] = True
+        p1 = SystemIdentificationPipeline(cfg1)
+        p1.run()
+
+        cfg2 = _make_config(tmp_path, "resume_out")
+        cfg2["checkpoint_dir"] = str(p1.output_dir)
+        mutate(cfg2)
+        with pytest.raises(ValueError, match=match):
+            SystemIdentificationPipeline(cfg2).run()
+
+    def test_sequential_redesign_resume_completes(self, tmp_path):
+        """Resuming with torque_constraint_method=sequential_redesign must
+        run the identification pass instead of crashing on the missing
+        in-loop identification (regression for the None-subscript bug).
+        The torque-method mismatch itself only warns."""
+        from src.pipeline import SystemIdentificationPipeline
+
+        cfg1 = _make_config(tmp_path, "exc_out")
+        cfg1["excitation_only"] = True
+        p1 = SystemIdentificationPipeline(cfg1)
+        p1.run()
+
+        cfg2 = _make_config(tmp_path, "resume_out")
+        cfg2["checkpoint_dir"] = str(p1.output_dir)
+        cfg2["excitation"]["torque_constraint_method"] = "sequential_redesign"
+        cfg2["joint_limits"]["torque"] = [[-50.0, 50.0], [-50.0, 50.0]]
+        p2 = SystemIdentificationPipeline(cfg2)
+        p2.run()
+        assert (p2.output_dir / "identification_results.npz").exists()
+
+
 class TestFullModeUnchanged:
     """Backward compatibility: default config (no partitioning flags)."""
 

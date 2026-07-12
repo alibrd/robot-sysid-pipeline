@@ -35,10 +35,14 @@ def build_friction_regressor(dq: np.ndarray, friction_model: str,
         blocks.append(Y_v)
 
     if friction_model in ("coulomb", "viscous_coulomb"):
-        # Positive-direction Coulomb: sigmoid(a - b*dq_i)
-        Y_cp = np.diag(1.0 / (1.0 + np.exp(sigmoid_a - sigmoid_b * dq)))
-        # Negative-direction Coulomb: -sigmoid(a + b*dq_i)
-        Y_cn = np.diag(-1.0 / (1.0 + np.exp(sigmoid_a + sigmoid_b * dq)))
+        # Logistic sigmoids written via the identity
+        #   1/(1 + exp(x)) == 0.5*(1 - tanh(x/2))
+        # which is overflow-free for any x (np.exp(a + b*dq) overflows and
+        # emits RuntimeWarnings whenever |dq| > ~0.7 rad/s with b=1000).
+        # Positive-direction Coulomb: sigmoid(b*dq_i - a)
+        Y_cp = np.diag(0.5 * (1.0 - np.tanh(0.5 * (sigmoid_a - sigmoid_b * dq))))
+        # Negative-direction Coulomb: -sigmoid(-b*dq_i - a)
+        Y_cn = np.diag(-0.5 * (1.0 - np.tanh(0.5 * (sigmoid_a + sigmoid_b * dq))))
         blocks.append(Y_cp)
         blocks.append(Y_cn)
 

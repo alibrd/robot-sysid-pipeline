@@ -40,7 +40,13 @@ class MeasurementValidationRunner:
         self.cfg = cfg
         self.output_dir = Path(cfg["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = setup_logger(str(self.output_dir))
+        # Own logger name: reusing the default "sysid_pipeline" name would
+        # re-point the pipeline logger's handlers into the validation dir.
+        self.logger = setup_logger(
+            str(self.output_dir),
+            name="measurement_validation",
+            log_filename="measurement_validation.log",
+        )
 
     def run(self) -> dict:
         log = self.logger

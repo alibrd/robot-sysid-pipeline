@@ -193,12 +193,30 @@ def solve_identification(W: np.ndarray,
 
     elif solver == "wls":
         if weights is None:
-            # Estimate weights from residual of OLS (iteratively-reweighted LS)
+            # Estimate per-joint noise variances from OLS residuals -- the
+            # classical sysid WLS weighting (Gautier / Swevers). Weighting
+            # each equation by 1/resid_i**2 individually would give near-
+            # infinite weight to whichever samples OLS happened to fit best
+            # and effectively interpolate them.
             pi_ols, _, _, _ = np.linalg.lstsq(W, tau_vec, rcond=None)
             resid = tau_vec - W @ pi_ols
-            sigma2 = np.maximum(resid**2, 1e-16)
-            weights = 1.0 / sigma2
-            logger.info("WLS: weights estimated from OLS residuals (IRLS step).")
+            if nDoF > 0 and resid.size % nDoF == 0:
+                # Rows are stacked per time sample: [joint_1..joint_n] blocks.
+                resid_per_joint = resid.reshape(-1, nDoF)
+                sigma2_j = np.maximum(np.var(resid_per_joint, axis=0), 1e-16)
+                weights = np.tile(1.0 / sigma2_j, resid_per_joint.shape[0])
+                logger.info(
+                    "WLS: per-joint noise variances estimated from OLS "
+                    "residuals: %s",
+                    np.array2string(sigma2_j, precision=3),
+                )
+            else:
+                sigma2 = max(float(np.var(resid)), 1e-16)
+                weights = np.full(resid.size, 1.0 / sigma2)
+                logger.info(
+                    "WLS: global noise variance estimated from OLS residuals "
+                    "(nDoF unavailable for per-joint grouping): %.3e", sigma2,
+                )
         sqrt_w = np.sqrt(weights)
         W_w = W * sqrt_w[:, None]
         tau_w = tau_vec * sqrt_w

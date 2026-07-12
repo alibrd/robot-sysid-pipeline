@@ -177,16 +177,35 @@ def test_urdf_effort_limit_is_parsed_from_joint_element(tmp_path):
     assert joint.limit_upper == 1.2
 
 
-def test_torque_limit_precedence_urdf_over_json_then_json_fallback_then_error(tmp_path):
+def test_torque_limit_precedence_json_over_urdf_then_urdf_fallback_then_error(tmp_path):
+    """Config torque limits override URDF efforts (so users can TIGHTEN the
+    rated effort for conservative excitation) but can never WIDEN beyond
+    the rated effort envelope; URDF is the fallback."""
     from src.urdf_parser import extract_torque_limits, parse_urdf
 
     urdf_path = tmp_path / "effort_bot.urdf"
     urdf_path.write_text(_EFFORT_URDF, encoding="utf-8")
-    _logger = type("L", (), {"debug": lambda *a, **kw: None})()
+    _logger = type("L", (), {
+        "debug": lambda *a, **kw: None,
+        "warning": lambda *a, **kw: None,
+    })()
 
     robot_effort = parse_urdf(str(urdf_path))
     tau_lim, sources = extract_torque_limits(
+        robot_effort, {"torque": [[-9.0, 9.0]]}, logger=_logger, required=True,
+    )
+    np.testing.assert_allclose(tau_lim, [[-9.0, 9.0]])
+    assert sources == ["json_torque"]
+
+    # Widening beyond the URDF rated effort (12 Nm) is clamped, not obeyed.
+    tau_lim, sources = extract_torque_limits(
         robot_effort, {"torque": [[-99.0, 99.0]]}, logger=_logger, required=True,
+    )
+    np.testing.assert_allclose(tau_lim, [[-12.0, 12.0]])
+    assert sources == ["json_torque_clamped"]
+
+    tau_lim, sources = extract_torque_limits(
+        robot_effort, {"torque": None}, logger=_logger, required=True,
     )
     np.testing.assert_allclose(tau_lim, [[-12.0, 12.0]])
     assert sources == ["urdf_effort"]

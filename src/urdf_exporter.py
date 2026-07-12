@@ -43,6 +43,7 @@ from typing import Optional, Union
 import numpy as np
 
 from .friction import friction_param_count
+from .kinematics import iter_fixed_subtree
 from .urdf_parser import parse_urdf, resolve_xacro_to_urdf_xml
 
 
@@ -149,15 +150,42 @@ def export_adapted_urdf(
         origin_el.set("xyz", _format_xyz(blk["com"]))
         origin_el.set("rpy", "0 0 0")
         mass_el = _set_or_create(inertial_el, "mass")
-        mass_el.set("value", f"{blk['mass']:.9g}")
+        mass_el.set("value", f"{blk['mass']:.17g}")
         inertia = blk["inertia_at_com"]
         inertia_el = _set_or_create(inertial_el, "inertia")
-        inertia_el.set("ixx", f"{inertia[0, 0]:.9g}")
-        inertia_el.set("ixy", f"{inertia[0, 1]:.9g}")
-        inertia_el.set("ixz", f"{inertia[0, 2]:.9g}")
-        inertia_el.set("iyy", f"{inertia[1, 1]:.9g}")
-        inertia_el.set("iyz", f"{inertia[1, 2]:.9g}")
-        inertia_el.set("izz", f"{inertia[2, 2]:.9g}")
+        inertia_el.set("ixx", f"{inertia[0, 0]:.17g}")
+        inertia_el.set("ixy", f"{inertia[0, 1]:.17g}")
+        inertia_el.set("ixz", f"{inertia[0, 2]:.17g}")
+        inertia_el.set("iyy", f"{inertia[1, 1]:.17g}")
+        inertia_el.set("iyz", f"{inertia[1, 2]:.17g}")
+        inertia_el.set("izz", f"{inertia[2, 2]:.17g}")
+
+    # 1b. Zero the inertials of links lumped into the revolute bodies.
+    # The identified pi vector already CONTAINS the inertia of every link
+    # attached through fixed-only joint paths (the kinematics lumps them
+    # into the preceding revolute body, matching how simulators merge
+    # fixed joints). Leaving the original fixed-child inertials in place
+    # would double-count that inertia when the adapted URDF is loaded.
+    zeroed_links: list[str] = []
+    for link_name in revolute_child_links:
+        for sub_name, _T in iter_fixed_subtree(robot, link_name):
+            if sub_name == link_name or sub_name not in name_to_link:
+                continue
+            sub_inertial = _set_or_create(name_to_link[sub_name], "inertial")
+            sub_origin = _set_or_create(sub_inertial, "origin")
+            sub_origin.set("xyz", "0 0 0")
+            sub_origin.set("rpy", "0 0 0")
+            _set_or_create(sub_inertial, "mass").set("value", "0")
+            sub_inertia_el = _set_or_create(sub_inertial, "inertia")
+            for attr in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz"):
+                sub_inertia_el.set(attr, "0")
+            zeroed_links.append(sub_name)
+    if zeroed_links:
+        log.info(
+            "Zeroed inertials of %d fixed-attached link(s) whose inertia is "
+            "carried by the identified revolute-body parameters: %s",
+            len(zeroed_links), ", ".join(zeroed_links),
+        )
 
     # 2. Overwrite per-joint <dynamics> tags from the friction parameters.
     friction_per_joint = _split_friction(theta_f, n_dof, friction_model)
@@ -171,10 +199,10 @@ def export_adapted_urdf(
             j_el = name_to_joint[joint_name]
             dyn_el = _set_or_create(j_el, "dynamics")
             if fric["Fv"] is not None:
-                dyn_el.set("damping", f"{fric['Fv']:.9g}")
+                dyn_el.set("damping", f"{fric['Fv']:.17g}")
             if fric["Fcp"] is not None or fric["Fcn"] is not None:
                 mag = 0.5 * (abs(fric["Fcp"] or 0.0) + abs(fric["Fcn"] or 0.0))
-                dyn_el.set("friction", f"{mag:.9g}")
+                dyn_el.set("friction", f"{mag:.17g}")
 
     # 3. Write the URDF.
     output_urdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +254,7 @@ def export_adapted_urdf(
         "n_friction_params": n_fric,
         "revolute_joint_names": revolute_joint_names,
         "revolute_child_links": revolute_child_links,
+        "zeroed_fixed_links": zeroed_links,
     }
 
 
@@ -299,4 +328,4 @@ def _set_or_create(parent: ET.Element, tag: str) -> ET.Element:
 
 
 def _format_xyz(v: np.ndarray) -> str:
-    return " ".join(f"{x: .9g}" for x in v)
+    return " ".join(f"{x: .17g}" for x in v)

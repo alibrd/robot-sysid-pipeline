@@ -150,6 +150,7 @@ class SystemIdentificationPipeline:
                 # Resume mode
                 log.info("Mode: RESUME FROM CHECKPOINT (%s)", checkpoint_dir)
                 cp_path = Path(checkpoint_dir)
+                self._validate_checkpoint_compatibility(cp_path)
                 log.info("Loading checkpoint from %s", cp_path)
                 cp_data = self._load_checkpoint(cp_path)
 
@@ -441,9 +442,12 @@ class SystemIdentificationPipeline:
         sequential_history = ctx["sequential_history"]
 
         # For sequential_redesign, identification was already done per
-        # iteration inside the Stage 6 redesign loop. For all other modes,
-        # run it now.
-        if torque_method == "sequential_redesign":
+        # iteration inside the Stage 6 redesign loop. For all other modes --
+        # and when resuming from a checkpoint, where the redesign loop did
+        # not run in this process and ctx["identification"] is None -- run
+        # it now.
+        if (torque_method == "sequential_redesign"
+                and ctx.get("identification") is not None):
             identification = ctx["identification"]
         else:
             identification = self._solve_identification_pass(
@@ -801,11 +805,108 @@ class SystemIdentificationPipeline:
         )
 
         config_path = self.output_dir / "checkpoint_config.json"
+        # Capture the URDF content digest AT SAVE TIME. Comparing two
+        # path-derived hashes at resume time cannot detect an in-place edit
+        # (both hashes would observe the already-edited file).
+        from .observation_matrix_cache import file_fingerprint
+
+        cfg_dump = dict(self.cfg)
+        cfg_dump["urdf_sha256"] = file_fingerprint(self.cfg.get("urdf_path"))
         with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(self.cfg, f, indent=2, default=str)
+            json.dump(cfg_dump, f, indent=2, default=str)
 
         self.logger.info("Checkpoint saved to %s", checkpoint_path)
         return checkpoint_path
+
+    def _validate_checkpoint_compatibility(self, checkpoint_dir: Path) -> None:
+        """Reject resuming with a config incompatible with the checkpoint.
+
+        Compares the current config against the ``checkpoint_config.json``
+        written alongside the checkpoint: method, friction model, the
+        excitation parameterisation, and the URDF *content* (SHA-256, so a
+        renamed-but-identical file still resumes). A silent mismatch either
+        crashes later with an obscure shape error or, worse, completes with
+        inconsistent data.
+        """
+        from .observation_matrix_cache import file_fingerprint
+
+        cfg_path = Path(checkpoint_dir) / "checkpoint_config.json"
+        if not cfg_path.exists():
+            self.logger.warning(
+                "checkpoint_config.json not found in %s; skipping checkpoint "
+                "compatibility validation.", checkpoint_dir,
+            )
+            return
+        with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            cp_cfg = json.load(f)
+
+        mismatches = []
+        if cp_cfg.get("method") is not None \
+                and self.cfg.get("method") != cp_cfg.get("method"):
+            mismatches.append(
+                f"method: current={self.cfg.get('method')!r}, "
+                f"checkpoint={cp_cfg.get('method')!r}"
+            )
+        cur_fric = (self.cfg.get("friction") or {}).get("model")
+        cp_fric = (cp_cfg.get("friction") or {}).get("model")
+        if cp_fric is not None and cur_fric != cp_fric:
+            mismatches.append(
+                f"friction.model: current={cur_fric!r}, checkpoint={cp_fric!r}"
+            )
+        exc_cur = self.cfg.get("excitation") or {}
+        exc_cp = cp_cfg.get("excitation") or {}
+        for key in ("basis_functions", "optimize_phase", "num_harmonics",
+                    "base_frequency_hz", "trajectory_duration_periods"):
+            if key in exc_cp and exc_cur.get(key) != exc_cp.get(key):
+                mismatches.append(
+                    f"excitation.{key}: current={exc_cur.get(key)!r}, "
+                    f"checkpoint={exc_cp.get(key)!r}"
+                )
+        cur_tm = exc_cur.get("torque_constraint_method")
+        cp_tm = exc_cp.get("torque_constraint_method")
+        if cp_tm is not None and cur_tm != cp_tm:
+            # Warning only: re-validating a saved design under a different
+            # torque model is a legitimate workflow (the design already ran).
+            self.logger.warning(
+                "excitation.torque_constraint_method differs from the "
+                "checkpoint (current=%r, checkpoint=%r); torque validation "
+                "semantics will follow the CURRENT config.", cur_tm, cp_tm,
+            )
+
+        # URDF content: prefer the digest captured when the checkpoint was
+        # SAVED — hashing both paths now cannot detect an in-place edit.
+        cur_fp = file_fingerprint(self.cfg.get("urdf_path"))
+        stored_fp = cp_cfg.get("urdf_sha256")
+        if stored_fp is not None:
+            if cur_fp is not None and cur_fp != stored_fp:
+                mismatches.append(
+                    f"URDF content differs from the checkpoint-time digest: "
+                    f"{self.cfg.get('urdf_path')} was modified after the "
+                    "checkpoint was saved (or is a different robot)."
+                )
+        else:
+            # Legacy checkpoint without a stored digest: fall back to
+            # comparing the two files as they exist NOW. This detects a
+            # different file but NOT an in-place edit of a shared path.
+            self.logger.warning(
+                "Checkpoint has no stored URDF digest (created by an older "
+                "version); in-place URDF edits since the checkpoint cannot "
+                "be detected."
+            )
+            cp_fp = file_fingerprint(cp_cfg.get("urdf_path"))
+            if cur_fp is not None and cp_fp is not None and cur_fp != cp_fp:
+                mismatches.append(
+                    f"URDF content differs: {self.cfg.get('urdf_path')} vs "
+                    f"checkpoint's {cp_cfg.get('urdf_path')}"
+                )
+
+        if mismatches:
+            raise ValueError(
+                "Checkpoint at "
+                f"{checkpoint_dir} is incompatible with the current config; "
+                "resuming would produce inconsistent results. Mismatches: "
+                + "; ".join(mismatches)
+            )
 
     @staticmethod
     def _load_checkpoint(checkpoint_dir: Path) -> dict:
@@ -966,7 +1067,16 @@ class SystemIdentificationPipeline:
             dq_data = data["dq"]
             ddq_data = data["ddq"]
             tau_data = data["tau"]
-            data_fs = float(data.get("fs", 1e4))
+            if "fs" in data.files:
+                data_fs = float(data["fs"])
+            else:
+                data_fs = 1e4
+                log.warning(
+                    "External data file %s has no 'fs' key; assuming "
+                    "%.0f Hz. A wrong sampling rate corrupts filtering and "
+                    "downsampling -- add 'fs' to the .npz.",
+                    data_file, data_fs,
+                )
             return q_data, dq_data, ddq_data, tau_data, data_fs
 
         log.info("Generating synthetic trajectory from excitation parameters.")
@@ -1113,11 +1223,18 @@ class SystemIdentificationPipeline:
         if isinstance(cfg_bounds, list) and len(cfg_bounds) == 2:
             lb = np.array(cfg_bounds[0])
             ub = np.array(cfg_bounds[1])
-            if len(lb) == rank and len(ub) == rank:
-                bounds_opt = (lb, ub)
-                if solver == "ols":
-                    solver = "bounded_ls"
-                    log.info("Switching to bounded_ls due to user parameter_bounds.")
+            if len(lb) != rank or len(ub) != rank:
+                raise ValueError(
+                    f"identification.parameter_bounds arrays have lengths "
+                    f"{len(lb)}/{len(ub)} but the base-parameter count for "
+                    f"this run is {rank}. Provide bounds of length {rank}, "
+                    "or set parameter_bounds=true for automatic +/-50% "
+                    "bounds around the nominal base parameters."
+                )
+            bounds_opt = (lb, ub)
+            if solver == "ols":
+                solver = "bounded_ls"
+                log.info("Switching to bounded_ls due to user parameter_bounds.")
         elif cfg_bounds is True:
             lb = pi_base - np.abs(pi_base) * 0.5 - 1e-3
             ub = pi_base + np.abs(pi_base) * 0.5 + 1e-3
@@ -1125,6 +1242,12 @@ class SystemIdentificationPipeline:
             if solver == "ols":
                 solver = "bounded_ls"
                 log.info("Switching to bounded_ls due to parameter_bounds=true")
+        elif cfg_bounds not in (None, False):
+            raise ValueError(
+                "identification.parameter_bounds must be false/null, true "
+                "(automatic +/-50% bounds), or a 2-element list "
+                f"[lower_bounds, upper_bounds]; got {cfg_bounds!r}."
+            )
 
         # Nominal-regulariser (paper Eq. 7 / Eq. 17) plumbing.
         # `pi_full` is the augmented nominal vector [pi_urdf, theta_f=0],
@@ -1191,18 +1314,30 @@ class SystemIdentificationPipeline:
 
         if info.get("solved_in_full_space"):
             pi_identified_full = pi_hat
+            log.debug(
+                "Full-space data residual: ||W_b*P*pi - tau|| = %.3e",
+                np.linalg.norm(W_base @ (P_mat @ pi_identified_full) - tau_vec),
+            )
         else:
-            pi_identified_full = np.linalg.pinv(P_mat) @ pi_hat
-
-        recon_err = np.linalg.norm(
-            W_base @ (P_mat @ pi_identified_full) - W_base @ pi_hat
-            if not info.get("solved_in_full_space")
-            else W_base @ P_mat @ pi_identified_full - tau_vec
-        )
-        log.debug(
-            "Reconstruction consistency: ||W_b*P*pi_recon - ref|| = %.3e",
-            recon_err,
-        )
+            # Anchor unidentifiable directions to the URDF nominal. The bare
+            # min-norm reconstruction pinv(P) @ pi_hat spreads unidentifiable
+            # parameter combinations arbitrarily (tiny or negative masses,
+            # implausible COMs), so the per-link feasibility check would fail
+            # on reconstruction artifacts rather than on the data. Because
+            # P @ pinv(P) = I on the base space, this form predicts exactly
+            # the same torques while keeping null-space components at their
+            # physically plausible nominal values.
+            pi_identified_full = beta_0_full + np.linalg.pinv(P_mat) @ (
+                pi_hat - P_mat @ beta_0_full
+            )
+            recon_err = np.linalg.norm(
+                W_base @ (P_mat @ pi_identified_full) - W_base @ pi_hat
+            )
+            log.debug(
+                "Reconstruction consistency: ||W_b*P*pi_recon - W_b*pi_hat|| "
+                "= %.3e",
+                recon_err,
+            )
 
         log.info("-- Stage 11: Feasibility check --")
         report, feasible, pi_corrected = check_feasibility(
@@ -1219,6 +1354,22 @@ class SystemIdentificationPipeline:
         pi_corrected = _clamp_negative_viscous_damping(
             pi_corrected, kin.nDoF, cfg["friction"]["model"], log
         )
+
+        if not np.array_equal(pi_corrected, pi_identified_full):
+            # PSD projection / friction clamping moved the parameters; the
+            # corrected model no longer minimises the identification
+            # residual, so quantify how much the predicted torques changed.
+            tau_delta = np.linalg.norm(
+                W_base @ (P_mat @ (pi_corrected - pi_identified_full))
+            )
+            tau_ref = np.linalg.norm(tau_vec) + 1e-30
+            log.warning(
+                "Feasibility projection / friction clamping changed the "
+                "identified parameters: torque-prediction delta "
+                "||W*(pi_corrected - pi_identified)|| = %.3e "
+                "(%.2e relative to ||tau||).",
+                tau_delta, tau_delta / tau_ref,
+            )
 
         return {
             "W": W,

@@ -115,12 +115,41 @@ def prepare_observation_samples(q_data: np.ndarray,
     ds_freq = cfg["downsampling"]["frequency_hz"]
     if ds_freq > 0 and ds_freq < original_fs:
         step = max(1, int(round(original_fs / ds_freq)))
-        logger.info(
-            "Downsampling: %d Hz -> %d Hz (step=%d)",
-            int(original_fs),
-            int(ds_freq),
-            step,
-        )
+        # Integer decimation cannot hit an arbitrary requested rate; the
+        # ACTUAL retained rate governs the new Nyquist band.
+        actual_fs = original_fs / step
+        if abs(actual_fs - ds_freq) > 1e-9 * max(ds_freq, 1.0):
+            logger.info(
+                "Downsampling: %g Hz -> requested %g Hz, actual %g Hz "
+                "(step=%d)", original_fs, ds_freq, actual_fs, step,
+            )
+        else:
+            logger.info(
+                "Downsampling: %d Hz -> %d Hz (step=%d)",
+                int(original_fs), int(ds_freq), step,
+            )
+        # Decimation without a matching low-pass is aliasing: everything
+        # above the new Nyquist folds back into the identification band.
+        cfg_filter = cfg.get("filtering", {}) or {}
+        anti_alias_cutoff = 0.45 * actual_fs
+        if step > 1 and not cfg_filter.get("enabled", False):
+            logger.warning(
+                "Downsampling %g Hz -> %g Hz WITHOUT low-pass filtering: "
+                "signal/noise content above %g Hz will alias into the "
+                "identification band. Enable filtering with "
+                "cutoff_frequency_hz <= %g.",
+                original_fs, actual_fs, 0.5 * actual_fs, anti_alias_cutoff,
+            )
+        elif step > 1 and float(
+            cfg_filter.get("cutoff_frequency_hz", 0.0) or 0.0
+        ) > anti_alias_cutoff:
+            logger.warning(
+                "Filter cutoff %g Hz exceeds the anti-aliasing limit %g Hz "
+                "for downsampling to %g Hz; residual content between the "
+                "cutoff and the new Nyquist (%g Hz) will alias.",
+                float(cfg_filter.get("cutoff_frequency_hz")),
+                anti_alias_cutoff, actual_fs, 0.5 * actual_fs,
+            )
     else:
         step = 1
 

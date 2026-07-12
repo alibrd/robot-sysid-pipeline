@@ -3,6 +3,22 @@ import logging
 import sys
 from pathlib import Path
 
+# Re-used across setup_logger calls: re-wrapping sys.stdout's fd on every
+# call leaks stream objects when several runners set up loggers in one
+# process (pipeline + validation stages).
+_CONSOLE_STREAM = None
+
+
+def _console_stream():
+    global _CONSOLE_STREAM
+    if _CONSOLE_STREAM is None or _CONSOLE_STREAM.closed:
+        # UTF-8 wrapper to avoid UnicodeEncodeError on Windows consoles
+        _CONSOLE_STREAM = open(
+            sys.stdout.fileno(), mode="w", encoding="utf-8",
+            closefd=False, buffering=1,
+        )
+    return _CONSOLE_STREAM
+
 
 def setup_logger(output_dir: str,
                  name: str = "sysid_pipeline",
@@ -27,10 +43,7 @@ def setup_logger(output_dir: str,
     ))
 
     # Console handler: force UTF-8 to avoid UnicodeEncodeError on Windows
-    ch = logging.StreamHandler(
-        open(sys.stdout.fileno(), mode="w", encoding="utf-8",
-             closefd=False, buffering=1)
-    )
+    ch = logging.StreamHandler(_console_stream())
     ch.setLevel(logging.INFO)
     ch.setFormatter(logging.Formatter("[%(levelname)-7s] %(message)s"))
 

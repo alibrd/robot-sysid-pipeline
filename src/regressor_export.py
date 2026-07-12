@@ -31,7 +31,6 @@ import numpy as np
 import sympy
 from sympy.printing.numpy import NumPyPrinter
 
-from .dynamics_euler_lagrange import euler_lagrange_regressor_builder
 from .regressor_model import RegressorModel
 
 
@@ -200,17 +199,18 @@ def export_dynamics_model_closed_form(
 
 
 def _load_symbolic_rigid_regressor(model: RegressorModel):
-    """Return ``(Y_sym, kept_cols)`` for the EL symbolic rigid regressor."""
-    kin = model.kin
-    cache_dir = model._el_cache_dir()
-    cache_path = Path(cache_dir) / "el_regressor_cache.pkl"
-    if not cache_path.exists():
-        euler_lagrange_regressor_builder(kin, cache_dir)
-    with open(cache_path, "rb") as f:
-        data = pickle.load(f)
-    Y_sym = data["Y_sym"]
-    kept_cols = [int(c) for c in data["kept_cols"]]
-    return Y_sym, kept_cols
+    """Return ``(Y_sym, kept_cols)`` for the EL symbolic rigid regressor.
+
+    Goes through the fingerprint-checked loader so a stale cache (URDF
+    geometry changed under the same cache directory) is rebuilt rather
+    than silently reused.
+    """
+    from .dynamics_euler_lagrange import load_or_build_symbolic_regressor
+
+    Y_sym, kept_cols = load_or_build_symbolic_regressor(
+        model.kin, model._el_cache_dir()
+    )
+    return Y_sym, [int(c) for c in kept_cols]
 
 
 def _sympy_friction_block(dq_syms, friction_model, pi_friction_num, n):
@@ -228,18 +228,22 @@ def _sympy_friction_block(dq_syms, friction_model, pi_friction_num, n):
                 expr_list[i] = expr_list[i] + sympy.Float(coef) * dq_syms[i]
         offset += n
     if friction_model in ("coulomb", "viscous_coulomb"):
+        # Emit the sigmoids via 1/(1+exp(x)) == 0.5*(1 - tanh(x/2)) so the
+        # printed NumPy expression cannot overflow (numpy.exp(a + b*dq)
+        # overflows for |dq| > ~0.7 rad/s with b=1000; tanh saturates).
+        half = sympy.Rational(1, 2)
         for i in range(n):
             coef = float(pi_friction_num[offset + i])
             if coef != 0.0:
-                expr_list[i] = expr_list[i] + sympy.Float(coef) / (
-                    1 + sympy.exp(a - b * dq_syms[i])
+                expr_list[i] = expr_list[i] + sympy.Float(coef) * (
+                    half - half * sympy.tanh(half * (a - b * dq_syms[i]))
                 )
         offset += n
         for i in range(n):
             coef = float(pi_friction_num[offset + i])
             if coef != 0.0:
-                expr_list[i] = expr_list[i] - sympy.Float(coef) / (
-                    1 + sympy.exp(a + b * dq_syms[i])
+                expr_list[i] = expr_list[i] - sympy.Float(coef) * (
+                    half - half * sympy.tanh(half * (a + b * dq_syms[i]))
                 )
         offset += n
     return expr_list
@@ -508,15 +512,12 @@ def _emit_el_source(model: RegressorModel) -> str:
     kin = model.kin
     n = model.nDoF
 
-    cache_dir = model._el_cache_dir()
-    cache_path = Path(cache_dir) / "el_regressor_cache.pkl"
-    if not cache_path.exists():
-        # Force the EL symbolic build to populate the cache.
-        euler_lagrange_regressor_builder(kin, cache_dir)
-    with open(cache_path, "rb") as f:
-        data = pickle.load(f)
-    Y_sym = data["Y_sym"]
-    kept_cols = list(data["kept_cols"])
+    from .dynamics_euler_lagrange import load_or_build_symbolic_regressor
+
+    Y_sym, kept_cols = load_or_build_symbolic_regressor(
+        kin, model._el_cache_dir()
+    )
+    kept_cols = list(kept_cols)
 
     q_alias = {sympy.Symbol(f"q{i + 1}"): sympy.Symbol(f"q_{i}") for i in range(n)}
     dq_alias = {sympy.Symbol(f"dq{i + 1}"): sympy.Symbol(f"dq_{i}") for i in range(n)}
@@ -746,8 +747,9 @@ def _emit_friction_block_source() -> str:
                 blocks.append(numpy.diag(dq))
             if model in ("coulomb", "viscous_coulomb"):
                 a, b = 10.0, 1000.0
-                blocks.append(numpy.diag(1.0 / (1.0 + numpy.exp(a - b * dq))))
-                blocks.append(numpy.diag(-1.0 / (1.0 + numpy.exp(a + b * dq))))
+                # 1/(1+exp(x)) == 0.5*(1 - tanh(x/2)): overflow-free sigmoid
+                blocks.append(numpy.diag(0.5 * (1.0 - numpy.tanh(0.5 * (a - b * dq)))))
+                blocks.append(numpy.diag(-0.5 * (1.0 - numpy.tanh(0.5 * (a + b * dq)))))
             return numpy.hstack(blocks)
 
         """

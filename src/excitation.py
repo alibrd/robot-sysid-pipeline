@@ -216,7 +216,30 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
     T_period = 1.0 / f0
     tf = n_periods * T_period
     dt_nyquist = 1.0 / (2.0 * freqs[-1])
-    t = np.arange(0.0, tf + dt_nyquist, dt_nyquist)
+    # Sampling at exactly the Nyquist rate of the highest harmonic aliases
+    # its sine component (sin(2*pi*f_max*t_k) == 0 at every grid point), so
+    # a Nyquist-rate design grid leaves the condition-number cost and any
+    # constraint evaluated on it blind to that component. Three grids with
+    # different density/cost trade-offs, all >= 2x above Nyquist:
+    #  * t       -- nonlinear (torque / fallback trajectory) constraints;
+    #               each evaluation runs the regressor per sample, so 2x
+    #               Nyquist balances fidelity against SLSQP runtime. The
+    #               guard band plus the dense post-optimisation replay
+    #               cover inter-sample peaks.
+    #  * t_lin   -- exact LinearConstraint rows for q/dq/ddq; precomputed
+    #               matrices are cheap per iteration, so they use the full
+    #               dense validation grid and optimisation feasibility
+    #               implies dense-validation feasibility.
+    #  * t_cost  -- condition-number cost; >= 4 samples per period of the
+    #               top harmonic up to the _COST_GRID_MAX cap (m*n_periods
+    #               <= ~30). Above the cap the density degrades gracefully
+    #               but the floor term keeps the grid STRICTLY above the
+    #               Nyquist rate of the top harmonic for any configuration.
+    dt_design = dt_nyquist / 2.0
+    t = np.arange(0.0, tf + dt_design, dt_design)
+    dt_lin = dt_nyquist / max(2, oversample)
+    t_lin = np.arange(0.0, tf + dt_lin, dt_lin)
+    t_cost = _cost_time_grid(m, n_periods, tf)
     q0 = np.mean(q_lim, axis=1)
 
     n_params = param_count(nDoF, m, basis, opt_phase)
@@ -259,16 +282,21 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
             _, _, base_kept_cols, _, _ = compute_base_parameters(
                 W_ref, np.ones(W_ref.shape[1])
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Base-column precomputation failed (%s: %s); falling back "
+                "to per-evaluation QR in the condition-number cost.",
+                type(exc).__name__, exc,
+            )
             base_kept_cols = None
 
     def cost_lit(x):
-        q, dq, ddq_v = fourier_trajectory(x, freqs, t, q0, basis, opt_phase)
+        q, dq, ddq_v = fourier_trajectory(x, freqs, t_cost, q0, basis, opt_phase)
         if opt_cond:
             if base_kept_cols is not None:
-                c_raw = _condition_cost_base_fast(q, dq, ddq_v, t, get_regressor, base_kept_cols)
+                c_raw = _condition_cost_base_fast(q, dq, ddq_v, t_cost, get_regressor, base_kept_cols)
             else:
-                c_raw = _condition_cost_base(q, dq, ddq_v, t, get_regressor)
+                c_raw = _condition_cost_base(q, dq, ddq_v, t_cost, get_regressor)
             # Use log10(cond) instead of raw cond to avoid gradient scale
             # mismatch with constraint gradients.  The raw condition number
             # can be O(10^4-10^5) at small amplitudes, producing gradients
@@ -294,14 +322,9 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
             )
         return c
 
-    # Using the same oversampled grid as the dense torque validation ensures
-    # that optimization feasibility implies dense-validation feasibility.
-    dt_con = dt_nyquist / max(1, oversample)
-    t_con = np.arange(0.0, tf + dt_con, dt_con)
-
     if basis == "sine" or (basis == "both" and not opt_phase):
         constraints = _build_linear_traj_constraints(
-            freqs, t_con, q0, q_lim, dq_lim, ddq_lim, nDoF, m, basis=basis
+            freqs, t_lin, q0, q_lim, dq_lim, ddq_lim, nDoF, m, basis=basis
         )
     else:
         constraints = _build_slsqp_constraints(
@@ -385,12 +408,40 @@ def optimise_excitation(kin, cfg_exc, q_lim, dq_lim, ddq_lim,
     }
 
 
+# Cap on the condition-number cost grid: each cost evaluation runs the
+# regressor once per sample, so this bounds the per-evaluation work for
+# ordinary configurations. The strictly-above-Nyquist floor in
+# _cost_time_grid may exceed it for extreme m*n_periods; correctness wins
+# over the cap there.
+_COST_GRID_MAX = 120
+
+
+def _cost_time_grid(m, n_periods, tf):
+    """Time grid for the condition-number cost.
+
+    Guarantees (the cost helpers evaluate EVERY sample of this grid):
+      * >= 4 samples per period of the top harmonic while
+        ``4*m*n_periods + 1 <= _COST_GRID_MAX`` (i.e. m*n_periods <= ~30);
+      * STRICTLY above the top harmonic's Nyquist rate for any (m,
+        n_periods) via the ``2*m*n_periods + 2`` floor -- an exactly- or
+        sub-Nyquist grid would alias the top harmonic's sine component
+        invisible to the optimiser.
+    """
+    n_cost = max(
+        int(np.ceil(2.0 * m * n_periods)) + 2,
+        min(int(np.ceil(4.0 * m * n_periods)) + 1, _COST_GRID_MAX),
+    )
+    return np.linspace(0.0, tf, n_cost)
+
+
 def _condition_cost_base(q, dq, ddq, t, get_reg_fn):
-    """Condition number on the base-parameter observation matrix."""
-    N = t.size
-    step = max(1, N // 50)
-    indices = list(range(0, N, step))
-    rows = [get_reg_fn(q[:, idx], dq[:, idx], ddq[:, idx]) for idx in indices]
+    """Condition number on the base-parameter observation matrix.
+
+    Uses every provided sample; the caller controls the grid density (see
+    ``_cost_time_grid``).
+    """
+    rows = [get_reg_fn(q[:, idx], dq[:, idx], ddq[:, idx])
+            for idx in range(t.size)]
     W = np.vstack(rows)
 
     p = W.shape[1]
@@ -403,11 +454,13 @@ def _condition_cost_base(q, dq, ddq, t, get_reg_fn):
 
 
 def _condition_cost_base_fast(q, dq, ddq, t, get_reg_fn, kept_cols):
-    """Condition number using pre-known base parameter column indices."""
-    N = t.size
-    step = max(1, N // 50)
-    indices = list(range(0, N, step))
-    rows = [get_reg_fn(q[:, idx], dq[:, idx], ddq[:, idx]) for idx in indices]
+    """Condition number using pre-known base parameter column indices.
+
+    Uses every provided sample; the caller controls the grid density (see
+    ``_cost_time_grid``).
+    """
+    rows = [get_reg_fn(q[:, idx], dq[:, idx], ddq[:, idx])
+            for idx in range(t.size)]
     W = np.vstack(rows)
     return _cond_from_matrix(W[:, kept_cols])
 

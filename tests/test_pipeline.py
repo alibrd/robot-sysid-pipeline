@@ -774,3 +774,88 @@ def test_pipeline_config_loader_resolves_relative_paths(tmp_path):
     assert cfg["identification"]["data_file"] == str(
         (config_dir / "../data/measured.npz").resolve()
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Focused regressions for the hardening batch
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestWlsPerJointWeights:
+    def test_wls_beats_ols_under_heteroscedastic_joint_noise(self):
+        """Per-joint variance weighting must outperform OLS when one joint
+        is ~1000x noisier than the other (regression for the invalid
+        1/resid**2 per-sample weighting)."""
+        from src.solver import solve_identification
+
+        rng = np.random.default_rng(3)
+        n_dof, n_samples, p = 2, 400, 6
+        W = rng.standard_normal((n_samples * n_dof, p))
+        pi_true = rng.standard_normal(p)
+        noise = np.zeros(n_samples * n_dof)
+        noise[0::n_dof] = 1e-3 * rng.standard_normal(n_samples)  # quiet joint
+        noise[1::n_dof] = 1.0 * rng.standard_normal(n_samples)   # noisy joint
+        tau_noisy = W @ pi_true + noise
+
+        pi_ols, _, _ = solve_identification(W, tau_noisy, solver="ols")
+        pi_wls, _, _ = solve_identification(
+            W, tau_noisy, solver="wls", nDoF=n_dof
+        )
+        err_ols = np.linalg.norm(pi_ols - pi_true)
+        err_wls = np.linalg.norm(pi_wls - pi_true)
+        assert err_wls < 0.5 * err_ols, (
+            f"WLS ({err_wls:.4g}) should clearly beat OLS ({err_ols:.4g})"
+        )
+
+
+class TestExternalDataFsFallback:
+    def test_missing_fs_defaults_and_warns(self, tmp_path):
+        from src.pipeline import SystemIdentificationPipeline
+
+        data_file = tmp_path / "meas.npz"
+        np.savez(
+            str(data_file),
+            q=np.zeros((10, 2)), dq=np.zeros((10, 2)),
+            ddq=np.zeros((10, 2)), tau=np.zeros((10, 2)),
+        )
+        cfg = {
+            "urdf_path": URDF_RRBOT,
+            "output_dir": str(tmp_path / "out"),
+            "joint_limits": {
+                "position": [[-1, 1]] * 2,
+                "velocity": [[-2, 2]] * 2,
+                "acceleration": [[-5, 5]] * 2,
+            },
+            "identification": {"data_file": str(data_file)},
+        }
+        pipeline = SystemIdentificationPipeline(cfg)
+        ctx = {
+            "kin": None,
+            "augmented_regressor_fn": None,
+            "true_nominal_params": None,
+        }
+        _, _, _, _, data_fs = pipeline._load_or_generate_data(ctx, None)
+        assert data_fs == 1e4
+        log_text = (pipeline.output_dir / "pipeline.log").read_text(
+            encoding="utf-8"
+        )
+        assert "has no 'fs' key" in log_text
+
+
+class TestLoggerIsolation:
+    def test_measurement_validator_does_not_hijack_pipeline_logger(self, tmp_path):
+        import logging
+
+        from src.measurement_validation import MeasurementValidationRunner
+        from src.pipeline_logger import setup_logger
+
+        pipe_logger = setup_logger(str(tmp_path / "pipe"))
+        handlers_before = list(pipe_logger.handlers)
+
+        runner = MeasurementValidationRunner({
+            "output_dir": str(tmp_path / "val"),
+            "urdf_path": "unused.urdf",
+            "measurements_path": "unused.npz",
+            "pipeline_dir": "unused",
+        })
+        assert runner.logger.name == "measurement_validation"
+        assert logging.getLogger("sysid_pipeline").handlers == handlers_before
